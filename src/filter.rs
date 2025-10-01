@@ -1,9 +1,11 @@
 use std::borrow::Cow;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use regex::Regex;
 
 use crate::common::{ColumnSelector, default_headers, reader_for_path, resolve_selectors};
 
@@ -87,6 +89,8 @@ enum CompareOp {
     Ge,
     Lt,
     Le,
+    RegexMatch,
+    RegexNotMatch,
 }
 
 #[derive(Debug, Clone)]
@@ -217,10 +221,17 @@ impl<'a> Lexer<'a> {
                 if self.peek_char(1) == Some(b'=') {
                     self.pos += 2;
                     Ok(Some(Token::Compare(CompareOp::Ne)))
+                } else if self.peek_char(1) == Some(b'~') {
+                    self.pos += 2;
+                    Ok(Some(Token::Compare(CompareOp::RegexNotMatch)))
                 } else {
                     self.pos += 1;
                     Ok(Some(Token::Not))
                 }
+            }
+            b'~' => {
+                self.pos += 1;
+                Ok(Some(Token::Compare(CompareOp::RegexMatch)))
             }
             b'=' => {
                 if self.peek_char(1) == Some(b'=') {
@@ -291,11 +302,25 @@ impl<'a> Lexer<'a> {
     fn lex_column(&mut self) -> Result<Option<Token>> {
         self.pos += 1;
         let start = self.pos;
-        while self.pos < self.chars.len()
-            && (self.chars[self.pos].is_ascii_alphanumeric()
-                || matches!(self.chars[self.pos], b'_' | b'.' | b'-'))
-        {
-            self.pos += 1;
+        let mut is_numeric = true;
+        while self.pos < self.chars.len() {
+            let c = self.chars[self.pos];
+            if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.') {
+                if !c.is_ascii_digit() {
+                    is_numeric = false;
+                }
+                self.pos += 1;
+                continue;
+            }
+            if c == b'-' {
+                if is_numeric && self.pos > start {
+                    break;
+                }
+                is_numeric = false;
+                self.pos += 1;
+                continue;
+            }
+            break;
         }
         if start == self.pos {
             bail!("column reference requires a name or index after '$'");
@@ -395,6 +420,40 @@ impl<'a> Lexer<'a> {
         while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_whitespace() {
             self.pos += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bind_expression, evaluate, parse_expression};
+    use csv::StringRecord;
+
+    #[test]
+    fn parses_numeric_columns_with_minus_operator() {
+        assert!(parse_expression("$3-$2").is_ok());
+    }
+
+    #[test]
+    fn parses_named_columns_with_dash() {
+        assert!(parse_expression("$foo-bar").is_ok());
+    }
+
+    #[test]
+    fn regex_match_operator_evaluates() {
+        let expr = parse_expression("$1 ~ \"^foo\"").unwrap();
+        let headers = vec!["col1".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let record = StringRecord::from(vec!["foobar"]);
+        assert!(evaluate(&bound, &record));
+    }
+
+    #[test]
+    fn regex_not_match_operator_evaluates() {
+        let expr = parse_expression("$1 !~ \"bar\"").unwrap();
+        let headers = vec!["col1".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let record = StringRecord::from(vec!["foo"]);
+        assert!(evaluate(&bound, &record));
     }
 }
 
@@ -657,7 +716,18 @@ enum BoundExpr {
     And(Box<BoundExpr>, Box<BoundExpr>),
     Not(Box<BoundExpr>),
     Compare(BoundValue, CompareOp, BoundValue),
+    RegexMatch {
+        value: BoundValue,
+        pattern: RegexPattern,
+        invert: bool,
+    },
     Value(BoundValue),
+}
+
+#[derive(Debug)]
+enum RegexPattern {
+    Static(Arc<Regex>),
+    Dynamic(Box<BoundValue>),
 }
 
 fn bind_expression(expr: Expr, headers: &[String], no_header: bool) -> Result<BoundExpr> {
@@ -673,11 +743,22 @@ fn bind_expression(expr: Expr, headers: &[String], no_header: bool) -> Result<Bo
         Expr::Not(inner) => Ok(BoundExpr::Not(Box::new(bind_expression(
             *inner, headers, no_header,
         )?))),
-        Expr::Compare(lhs, op, rhs) => Ok(BoundExpr::Compare(
-            bind_value(lhs, headers, no_header)?,
-            op,
-            bind_value(rhs, headers, no_header)?,
-        )),
+        Expr::Compare(lhs, op, rhs) => match op {
+            CompareOp::RegexMatch | CompareOp::RegexNotMatch => {
+                let value = bind_value(lhs, headers, no_header)?;
+                let pattern = bind_regex_pattern(rhs, headers, no_header)?;
+                Ok(BoundExpr::RegexMatch {
+                    value,
+                    pattern,
+                    invert: matches!(op, CompareOp::RegexNotMatch),
+                })
+            }
+            _ => Ok(BoundExpr::Compare(
+                bind_value(lhs, headers, no_header)?,
+                op,
+                bind_value(rhs, headers, no_header)?,
+            )),
+        },
         Expr::Value(val) => Ok(BoundExpr::Value(bind_value(val, headers, no_header)?)),
     }
 }
@@ -711,12 +792,35 @@ fn bind_value(value: ValueExpr, headers: &[String], no_header: bool) -> Result<B
     }
 }
 
+fn bind_regex_pattern(
+    value: ValueExpr,
+    headers: &[String],
+    no_header: bool,
+) -> Result<RegexPattern> {
+    match value {
+        ValueExpr::String(pattern) => {
+            let regex = Regex::new(&pattern)
+                .with_context(|| format!("invalid regex pattern '{}'", pattern))?;
+            Ok(RegexPattern::Static(Arc::new(regex)))
+        }
+        other => {
+            let bound = bind_value(other, headers, no_header)?;
+            Ok(RegexPattern::Dynamic(Box::new(bound)))
+        }
+    }
+}
+
 fn evaluate(expr: &BoundExpr, record: &csv::StringRecord) -> bool {
     match expr {
         BoundExpr::Or(lhs, rhs) => evaluate(lhs, record) || evaluate(rhs, record),
         BoundExpr::And(lhs, rhs) => evaluate(lhs, record) && evaluate(rhs, record),
         BoundExpr::Not(inner) => !evaluate(inner, record),
         BoundExpr::Compare(lhs, op, rhs) => evaluate_compare(lhs, *op, rhs, record),
+        BoundExpr::RegexMatch {
+            value,
+            pattern,
+            invert,
+        } => evaluate_regex(value, pattern, *invert, record),
         BoundExpr::Value(value) => evaluate_truthy(value, record),
     }
 }
@@ -737,7 +841,30 @@ fn evaluate_compare(
         CompareOp::Ge => compare_numeric(&left, &right, |a, b| a >= b),
         CompareOp::Lt => compare_numeric(&left, &right, |a, b| a < b),
         CompareOp::Le => compare_numeric(&left, &right, |a, b| a <= b),
+        CompareOp::RegexMatch | CompareOp::RegexNotMatch => false,
     }
+}
+
+fn evaluate_regex(
+    value: &BoundValue,
+    pattern: &RegexPattern,
+    invert: bool,
+    record: &csv::StringRecord,
+) -> bool {
+    let hay = eval_value(value, record);
+    let haystack = hay.text.as_ref();
+    let is_match = match pattern {
+        RegexPattern::Static(regex) => regex.is_match(haystack),
+        RegexPattern::Dynamic(bound) => {
+            let pat_eval = eval_value(bound, record);
+            let pattern_text = pat_eval.text.as_ref();
+            Regex::new(pattern_text)
+                .ok()
+                .map(|re| re.is_match(haystack))
+                .unwrap_or(false)
+        }
+    };
+    if invert { !is_match } else { is_match }
 }
 
 fn evaluate_truthy(value: &BoundValue, record: &csv::StringRecord) -> bool {

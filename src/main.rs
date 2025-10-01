@@ -5,7 +5,10 @@ mod common;
 mod cut;
 mod filter;
 mod join;
+mod melt;
+mod pivot;
 mod pretty;
+mod sort;
 mod summarize;
 
 #[derive(Parser)]
@@ -32,6 +35,12 @@ enum Commands {
     Pretty(pretty::PrettyArgs),
     /// Filter rows using expressions on column values
     Filter(filter::FilterArgs),
+    /// Pivot long data into wide format
+    Pivot(pivot::PivotArgs),
+    /// Melt wide data into long format
+    Melt(melt::MeltArgs),
+    /// Sort rows by one or more key columns
+    Sort(sort::SortArgs),
 }
 
 fn main() -> Result<()> {
@@ -42,5 +51,8 @@ fn main() -> Result<()> {
         Commands::Cut(args) => cut::run(args),
         Commands::Pretty(args) => pretty::run(args),
         Commands::Filter(args) => filter::run(args),
+        Commands::Pivot(args) => pivot::run(args),
+        Commands::Melt(args) => melt::run(args),
+        Commands::Sort(args) => sort::run(args),
     }
 }

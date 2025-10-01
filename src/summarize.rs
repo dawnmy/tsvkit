@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 
@@ -29,7 +30,13 @@ pub struct SummarizeArgs {
     pub no_header: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+struct QuantileSpec {
+    fraction: f64,
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 enum StatOp {
     Sum,
     Mean,
@@ -38,12 +45,20 @@ enum StatOp {
     Last,
     Count,
     Sd,
+    Var,
     Min,
     Max,
+    Mode,
+    Distinct,
+    Quantile(QuantileSpec),
 }
 
 impl StatOp {
     fn from_str(op: &str) -> Result<Self> {
+        if let Some(spec) = parse_quantile_spec(op) {
+            return Ok(StatOp::Quantile(spec));
+        }
+
         match op.to_lowercase().as_str() {
             "sum" => Ok(StatOp::Sum),
             "mean" | "avg" => Ok(StatOp::Mean),
@@ -52,16 +67,19 @@ impl StatOp {
             "last" => Ok(StatOp::Last),
             "count" => Ok(StatOp::Count),
             "sd" | "std" | "stddev" => Ok(StatOp::Sd),
+            "var" | "variance" => Ok(StatOp::Var),
             "min" => Ok(StatOp::Min),
             "max" => Ok(StatOp::Max),
+            "mode" => Ok(StatOp::Mode),
+            "distinct" | "unique" => Ok(StatOp::Distinct),
             other => bail!(
-                "unsupported stat '{}': sum, mean, median, first, last, count, sd, min, max",
+                "unsupported stat '{}': sum, mean, median, first, last, count, sd, var, min, max, mode, distinct, quantiles",
                 other
             ),
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(&self) -> &str {
         match self {
             StatOp::Sum => "sum",
             StatOp::Mean => "mean",
@@ -70,10 +88,79 @@ impl StatOp {
             StatOp::Last => "last",
             StatOp::Count => "count",
             StatOp::Sd => "sd",
+            StatOp::Var => "var",
             StatOp::Min => "min",
             StatOp::Max => "max",
+            StatOp::Mode => "mode",
+            StatOp::Distinct => "distinct",
+            StatOp::Quantile(spec) => spec.label.as_str(),
         }
     }
+}
+
+fn parse_quantile_spec(token: &str) -> Option<QuantileSpec> {
+    let trimmed = token.trim();
+    if trimmed.len() < 2 {
+        return None;
+    }
+    let prefix = trimmed.chars().next()?.to_ascii_lowercase();
+    let rest_original = &trimmed[1..];
+    let rest = rest_original.trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    match prefix {
+        'q' => {
+            let fraction = if let Ok(val) = rest.parse::<f64>() {
+                if (0.0..=1.0).contains(&val) {
+                    val
+                } else if (1.0..=100.0).contains(&val) {
+                    val / 100.0
+                } else {
+                    return None;
+                }
+            } else if let Ok(int_val) = rest.parse::<u32>() {
+                if int_val <= 4 {
+                    int_val as f64 / 4.0
+                } else if int_val <= 100 {
+                    int_val as f64 / 100.0
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            };
+            Some(QuantileSpec {
+                fraction,
+                label: format!("q{}", sanitize_quantile_label(rest_original)),
+            })
+        }
+        'p' => {
+            let percent = rest.parse::<f64>().ok()?;
+            if !(0.0..=100.0).contains(&percent) {
+                return None;
+            }
+            Some(QuantileSpec {
+                fraction: percent / 100.0,
+                label: format!("p{}", sanitize_quantile_label(rest_original)),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn sanitize_quantile_label(segment: &str) -> String {
+    let mut label = segment.trim().to_ascii_lowercase();
+    if label.is_empty() {
+        label.push('0');
+    }
+    while label.starts_with('0') && label.len() > 1 && label.chars().nth(1) != Some('.') {
+        label.remove(0);
+    }
+    label = label.replace('%', "");
+    label = label.replace('.', "_");
+    label.replace('-', "_")
 }
 
 struct StatRequest {
@@ -89,7 +176,10 @@ struct ColumnAggState {
     needs_numeric: bool,
     needs_variance: bool,
     needs_median: bool,
+    needs_quantiles: bool,
     needs_minmax: bool,
+    needs_mode: bool,
+    needs_distinct: bool,
     first: Option<String>,
     last: Option<String>,
     count: usize,
@@ -99,6 +189,8 @@ struct ColumnAggState {
     values: Vec<f64>,
     min: Option<f64>,
     max: Option<f64>,
+    mode_counts: IndexMap<String, usize>,
+    distinct_values: HashSet<String>,
 }
 
 impl ColumnAggState {
@@ -111,14 +203,19 @@ impl ColumnAggState {
                 StatOp::Sum
                     | StatOp::Mean
                     | StatOp::Median
+                    | StatOp::Var
                     | StatOp::Sd
                     | StatOp::Min
                     | StatOp::Max
+                    | StatOp::Quantile(_)
             )
         });
-        let needs_variance = ops.iter().any(|op| matches!(op, StatOp::Sd));
+        let needs_variance = ops.iter().any(|op| matches!(op, StatOp::Sd | StatOp::Var));
         let needs_median = ops.iter().any(|op| matches!(op, StatOp::Median));
+        let needs_quantiles = ops.iter().any(|op| matches!(op, StatOp::Quantile(_)));
         let needs_minmax = ops.iter().any(|op| matches!(op, StatOp::Min | StatOp::Max));
+        let needs_mode = ops.iter().any(|op| matches!(op, StatOp::Mode));
+        let needs_distinct = ops.iter().any(|op| matches!(op, StatOp::Distinct));
         ColumnAggState {
             ops,
             needs_first,
@@ -126,7 +223,10 @@ impl ColumnAggState {
             needs_numeric,
             needs_variance,
             needs_median,
+            needs_quantiles,
             needs_minmax,
+            needs_mode,
+            needs_distinct,
             first: None,
             last: None,
             count: 0,
@@ -136,6 +236,8 @@ impl ColumnAggState {
             values: Vec::new(),
             min: None,
             max: None,
+            mode_counts: IndexMap::new(),
+            distinct_values: HashSet::new(),
         }
     }
 
@@ -148,6 +250,14 @@ impl ColumnAggState {
         }
         self.count += 1;
 
+        if self.needs_mode {
+            let entry = self.mode_counts.entry(value.to_string()).or_insert(0);
+            *entry += 1;
+        }
+        if self.needs_distinct {
+            self.distinct_values.insert(value.to_string());
+        }
+
         if self.needs_numeric {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -157,7 +267,7 @@ impl ColumnAggState {
                     if self.needs_variance {
                         self.sum_sq += number * number;
                     }
-                    if self.needs_median {
+                    if self.needs_median || self.needs_quantiles {
                         self.values.push(number);
                     }
                     if self.needs_minmax {
@@ -176,7 +286,7 @@ impl ColumnAggState {
     }
 
     fn finalize(&mut self) -> Vec<String> {
-        if self.needs_median && !self.values.is_empty() {
+        if (self.needs_median || self.needs_quantiles) && !self.values.is_empty() {
             self.values
                 .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         }
@@ -217,11 +327,39 @@ impl ColumnAggState {
                             .unwrap_or_default(),
                     );
                 }
+                StatOp::Var => {
+                    results.push(
+                        variance(self.sum, self.sum_sq, self.numeric_count)
+                            .map(format_number)
+                            .unwrap_or_default(),
+                    );
+                }
                 StatOp::Min => {
                     results.push(self.min.map(format_number).unwrap_or_default());
                 }
                 StatOp::Max => {
                     results.push(self.max.map(format_number).unwrap_or_default());
+                }
+                StatOp::Mode => {
+                    let mut best_value = String::new();
+                    let mut best_count = 0usize;
+                    for (value, count) in &self.mode_counts {
+                        if *count > best_count {
+                            best_count = *count;
+                            best_value = value.clone();
+                        }
+                    }
+                    results.push(best_value);
+                }
+                StatOp::Distinct => {
+                    results.push(self.distinct_values.len().to_string());
+                }
+                StatOp::Quantile(spec) => {
+                    results.push(
+                        quantile(&self.values, spec.fraction)
+                            .map(format_number)
+                            .unwrap_or_default(),
+                    );
                 }
             }
         }
@@ -477,10 +615,36 @@ fn median(values: &[f64]) -> Option<f64> {
 }
 
 fn stddev(sum: f64, sum_sq: f64, count: usize) -> Option<f64> {
+    variance(sum, sum_sq, count).map(|var| var.sqrt())
+}
+
+fn variance(sum: f64, sum_sq: f64, count: usize) -> Option<f64> {
     if count == 0 {
         return None;
     }
     let mean = sum / count as f64;
     let variance = (sum_sq / count as f64) - mean * mean;
-    Some(variance.max(0.0).sqrt())
+    Some(variance.max(0.0))
+}
+
+fn quantile(values: &[f64], fraction: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let n = values.len();
+    if n == 1 {
+        return Some(values[0]);
+    }
+    let clamped = fraction.clamp(0.0, 1.0);
+    let position = clamped * (n - 1) as f64;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    if lower == upper {
+        Some(values[lower])
+    } else {
+        let weight = position - lower as f64;
+        let lower_value = values[lower];
+        let upper_value = values[upper];
+        Some(lower_value + (upper_value - lower_value) * weight)
+    }
 }
