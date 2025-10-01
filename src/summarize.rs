@@ -112,19 +112,20 @@ fn parse_quantile_spec(token: &str) -> Option<QuantileSpec> {
 
     match prefix {
         'q' => {
-            let fraction = if let Ok(val) = rest.parse::<f64>() {
-                if (0.0..=1.0).contains(&val) {
-                    val
-                } else if (1.0..=100.0).contains(&val) {
-                    val / 100.0
-                } else {
-                    return None;
-                }
-            } else if let Ok(int_val) = rest.parse::<u32>() {
+            let fraction = if rest.chars().all(|c| c.is_ascii_digit()) {
+                let int_val = rest.parse::<u32>().ok()?;
                 if int_val <= 4 {
                     int_val as f64 / 4.0
                 } else if int_val <= 100 {
                     int_val as f64 / 100.0
+                } else {
+                    return None;
+                }
+            } else if let Ok(val) = rest.parse::<f64>() {
+                if (0.0..=1.0).contains(&val) {
+                    val
+                } else if (1.0..=100.0).contains(&val) {
+                    val / 100.0
                 } else {
                     return None;
                 }
@@ -646,5 +647,36 @@ fn quantile(values: &[f64], fraction: f64) -> Option<f64> {
         let lower_value = values[lower];
         let upper_value = values[upper];
         Some(lower_value + (upper_value - lower_value) * weight)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_quantile_spec;
+
+    #[test]
+    fn quantile_aliases_map_to_expected_fractions() {
+        let q1 = parse_quantile_spec("q1").unwrap();
+        assert!((q1.fraction - 0.25).abs() < f64::EPSILON);
+
+        let q2 = parse_quantile_spec("q2").unwrap();
+        assert!((q2.fraction - 0.5).abs() < f64::EPSILON);
+
+        let q3 = parse_quantile_spec("q3").unwrap();
+        assert!((q3.fraction - 0.75).abs() < f64::EPSILON);
+
+        let q5 = parse_quantile_spec("q5").unwrap();
+        assert!((q5.fraction - 0.05).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn decimal_quantiles_pass_through() {
+        let q = parse_quantile_spec("q0.6").unwrap();
+        assert!((q.fraction - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn out_of_range_quantiles_reject() {
+        assert!(parse_quantile_spec("q250").is_none());
     }
 }
