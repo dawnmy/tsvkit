@@ -22,10 +22,10 @@ cargo build --release
 Run without arguments to see the top-level help:
 
 ```
-./target/release/tsvkit --help
+tsvkit --help
 ```
 
-Each subcommand also ships rich help text, e.g. `./target/release/tsvkit summarize --help`.
+Each subcommand also ships rich help text, e.g. `tsvkit summarize --help`.
 
 ---
 
@@ -67,8 +67,8 @@ Save the snippets exactly as shown (tabs between fields) and run the commands fr
 
 Join multiple TSV files on one or more key columns. Column selectors can be header names or 1-based indices. Join fields are printed once, even when sourced from several tables. If all files share the same key specification you can provide it once (e.g. `-f id`). Use semicolons to provide different selectors per file and commas to list multiple columns within a selector.
 
-````
-./target/release/tsvkit join \
+```
+tsvkit join \
   -f id \
   metadata.tsv abundance.tsv
 ```
@@ -88,7 +88,7 @@ Control the join type with `-k`:
 Full join example:
 
 ```
-./target/release/tsvkit join -f id -k 0 metadata.tsv abundance.tsv
+tsvkit join -f id -k 0 metadata.tsv abundance.tsv
 ```
 _Output_
 ```
@@ -102,13 +102,13 @@ D		5	Archaea
 Left join keeping all metadata rows:
 
 ```
-./target/release/tsvkit join -f id -k 1 metadata.tsv abundance.tsv
+tsvkit join -f id -k 1 metadata.tsv abundance.tsv
 ```
 
 To join on multiple columns, separate them with commas. Different selectors per file require semicolons:
 
 ```
-./target/release/tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv
+tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv
 ```
 
 Pass `-H` when the inputs have no header row.
@@ -122,7 +122,7 @@ Group rows and compute statistics. The `-g` flag selects grouping columns, while
 Average all measurement columns:
 
 ```
-./target/release/tsvkit summarize \
+tsvkit summarize \
   -s 'sample1:sample3=mean' \
   profiles.tsv
 ```
@@ -135,7 +135,7 @@ sample1_mean	sample2_mean	sample3_mean
 Combine ranges and single columns with an operator list:
 
 ```
-./target/release/tsvkit summarize \
+tsvkit summarize \
   -s 'sample1,sample3=sd' \
   profiles.tsv
 ```
@@ -143,7 +143,7 @@ Combine ranges and single columns with an operator list:
 Group by metadata and calculate multi-operator summaries:
 
 ```
-./target/release/tsvkit summarize \
+tsvkit summarize \
   -g group \
   -s 'sample1=mean,sd' \
   -s 'sample2:sample3=sum' \
@@ -165,7 +165,7 @@ Headerless data requires `-H`, and indices become the default (`1:3=mean`).
 Select and reorder columns. Works on headers or 1-based indices.
 
 ```
-./target/release/tsvkit cut \
+tsvkit cut \
   -f id,sample3,sample1 \
   profiles.tsv
 ```
@@ -180,7 +180,7 @@ C	9	7
 With no headers:
 
 ```
-./target/release/tsvkit cut -H -f 3,1 data.tsv
+tsvkit cut -H -f 3,1 data.tsv
 ```
 
 ---
@@ -190,7 +190,7 @@ With no headers:
 Render a table with aligned columns and box drawing characters for quick inspection.
 
 ```
-./target/release/tsvkit pretty profiles.tsv
+tsvkit pretty profiles.tsv
 ```
 _Output_
 ```
@@ -211,12 +211,12 @@ Use `-H` to suppress the header banner for raw data.
 
 Filter rows using a mini expression language. Expressions reference columns with `$name` or `$index`, combine predicates with `&`, `|`, and `!`, and support parentheses plus comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`). Numeric literals understand scientific notation and leading minus signs; string literals require double quotes.
 
-You can build arithmetic expressions with `+`, `-`, `*`, and `/`, chain inequalities (`1.5 < $depth/$total < 0.75`), and call single-argument numeric functions such as `abs()`, `sqrt()`, `exp()`, `ln()`, and `log()`/`log10()`.
+You can build arithmetic expressions with `+`, `-`, `*`, and `/`, chain inequalities (`1.5 < $sampl1/$sampl2 < 0.75`), and call single-argument numeric functions such as `abs()`, `sqrt()`, `exp()`, `ln()`, and `log()`/`log10()`.
 
 Select rows where `sample2 >= 5` **and** `sample3 != 9`:
 
 ```
-./target/release/tsvkit filter \
+tsvkit filter \
   -e '$sample2>=5 & $sample3!=9' \
   profiles.tsv
 ```
@@ -224,13 +224,13 @@ Select rows where `sample2 >= 5` **and** `sample3 != 9`:
 Slice headerless data by index:
 
 ```
-./target/release/tsvkit filter -H -e '$2>=40' measurements.tsv
+tsvkit filter -H -e '$2>=40' measurements.tsv
 ```
 
 Use arithmetic and functions together:
 
 ```
-./target/release/tsvkit filter \
+tsvkit filter \
   -e 'abs($v7 - $v8) > 0.5 & sqrt($v7) >= 1' \
   data.tsv
 ```
@@ -246,8 +246,4 @@ Boolean expressions follow short-circuit semantics. Every column reference that 
 - `tsvkit` streams data; piping between subcommands enables complex pipelines: `tsvkit cut ... | tsvkit filter ... | tsvkit summarize ...`.
 - If you hit performance bottlenecks on huge files, prefer column indices over names to skip the name lookup cost.
 
----
 
-## License
-
-This project inherits the license of the surrounding repository. Check the repository root for licensing details.
