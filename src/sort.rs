@@ -11,6 +11,10 @@ use crate::common::{
 };
 
 #[derive(Args, Debug)]
+#[command(
+    about = "Sort TSV rows by column keys",
+    long_about = "Sort TSV rows by one or more keys. Provide -k/--key with column selectors (names or 1-based indices) and optional modifiers: :n (numeric asc), :nr (numeric desc), :r (reverse text). Repeat -k for additional sort levels. Defaults to header-aware mode; add -H for headerless files.\n\nExamples:\n  tsvkit sort -k count:nr examples/abundance.tsv\n  tsvkit sort -k $1:nr -k $2:r examples/profiles.tsv"
+)]
 pub struct SortArgs {
     /// Input TSV file (use '-' for stdin)
     #[arg(value_name = "FILE", default_value = "-")]

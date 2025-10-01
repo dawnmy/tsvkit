@@ -10,12 +10,16 @@ use crate::common::{
 };
 
 #[derive(Args, Debug)]
+#[command(
+    about = "Join multiple TSV files on shared key columns",
+    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Keys default to an inner join; adjust with -k/--keep. When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
+)]
 pub struct JoinArgs {
     /// Input TSV files (use '-' for stdin)
     #[arg(value_name = "FILES", required = true)]
     pub files: Vec<PathBuf>,
 
-    /// Join field specification, e.g. "id" or "id,name;id" for different files
+    /// Join field specification, e.g. "id" or "id;name;ID" for different files
     #[arg(short = 'f', long = "fields", value_name = "SPEC", required = true)]
     pub fields: String,
 
@@ -193,6 +197,7 @@ pub fn run(args: JoinArgs) -> Result<()> {
     }
 
     let column_specs = parse_multi_selector_spec(&args.fields, args.files.len())?;
+    validate_join_width(&column_specs)?;
 
     let keep = parse_keep_option(args.keep.as_deref(), args.files.len())?;
 
@@ -292,6 +297,24 @@ fn load_table(path: &Path, selectors: &[ColumnSelector], no_header: bool) -> Res
         key_order,
         empty_row,
     })
+}
+
+fn validate_join_width(column_specs: &[Vec<ColumnSelector>]) -> Result<()> {
+    if column_specs.is_empty() {
+        return Ok(());
+    }
+    let expected = column_specs[0].len();
+    for (idx, specs) in column_specs.iter().enumerate() {
+        if specs.len() != expected {
+            bail!(
+                "join fields must select the same number of columns for each file (file {} selects {}, expected {})",
+                idx + 1,
+                specs.len(),
+                expected
+            );
+        }
+    }
+    Ok(())
 }
 
 fn make_key(row: &[String], indices: &[usize]) -> Vec<String> {

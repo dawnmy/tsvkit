@@ -7,6 +7,10 @@ use clap::Args;
 use crate::common::{default_headers, parse_selector_list, reader_for_path, resolve_selectors};
 
 #[derive(Args, Debug)]
+#[command(
+    about = "Select and reorder TSV columns",
+    long_about = "Pick columns by name or 1-based index. Combine comma-separated selectors with ranges (colA:colD or 2:6) and single fields in one spec. Defaults to header-aware mode; add -H for headerless input.\n\nExamples:\n  tsvkit cut -f id,sample3,sample1 examples/profiles.tsv\n  tsvkit cut -f 'Purity,sample:FN,F1' examples/profiles.tsv\n  tsvkit cut -H -f 3,1 data.tsv"
+)]
 pub struct CutArgs {
     /// Input TSV file (use '-' for stdin)
     #[arg(value_name = "FILE", default_value = "-")]

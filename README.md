@@ -254,7 +254,7 @@ Select and reorder columns. Works on headers or 1-based indices.
 ```
 tsvkit cut \
   -f id,sample3,sample1 \
-  profiles.tsv
+  examples/profiles.tsv
 ```
 _Output_
 ```
@@ -269,6 +269,8 @@ With no headers:
 ```
 tsvkit cut -H -f 3,1 data.tsv
 ```
+
+Ranges use `start:end` and expand to every column in between, so you can mix single fields and blocks in one spec. For example, `tsvkit cut -f 'Purity,sample:FN,F1' examples/profiles.tsv` selects `Purity`, the contiguous stretch from `sample` through `FN`, and then `F1`.
 
 ---
 

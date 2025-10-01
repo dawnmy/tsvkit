@@ -15,7 +15,8 @@ mod summarize;
 #[command(
     name = "tsvkit",
     version,
-    about = "Toolkit for working with TSV files",
+    about = "High-level TSV toolkit: join, filter, reshape, summarize.",
+    long_about = "tsvkit is a Swiss-army knife for tab-separated data. It ships focused subcommands for joins, filtering, column selection, statistics, reshaping, and pretty-printing. Every subcommand reads from files or standard input and respects headers by default.",
     author = "tsvkit"
 )]
 struct Cli {

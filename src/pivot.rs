@@ -10,6 +10,10 @@ use crate::common::{
 };
 
 #[derive(Args, Debug)]
+#[command(
+    about = "Pivot long-form TSV data into wide tables",
+    long_about = "Convert long (tidy) TSV data into a wide table by promoting row values to columns. Specify which columns remain as identifiers (-i/--index), which column provides the new headers (-c/--column), and which supplies cell values (-v/--value). Use --fill for missing combinations.\n\nExample:\n  tsvkit melt -i id examples/profiles.tsv | tsvkit pivot -i id -c variable -v value"
+)]
 pub struct PivotArgs {
     /// Input TSV file (use '-' for stdin)
     #[arg(value_name = "FILE", default_value = "-")]

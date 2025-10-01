@@ -8,6 +8,10 @@ use indexmap::IndexSet;
 use crate::common::{default_headers, parse_selector_list, reader_for_path, resolve_selectors};
 
 #[derive(Args, Debug)]
+#[command(
+    about = "Melt wide TSV tables into long form",
+    long_about = "Convert wide TSV tables into a tidy long format. Use -i/--id to keep identifier columns, optionally -v/--value-cols to target specific value columns, and rename the generated columns with --variable/--value. Defaults to header-aware mode; add -H for headerless files.\n\nExample:\n  tsvkit melt -i id examples/profiles.tsv"
+)]
 pub struct MeltArgs {
     /// Input TSV file (use '-' for stdin)
     #[arg(value_name = "FILE", default_value = "-")]

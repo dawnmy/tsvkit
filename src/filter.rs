@@ -10,6 +10,15 @@ use regex::Regex;
 use crate::common::{ColumnSelector, default_headers, reader_for_path, resolve_selectors};
 
 #[derive(Args, Debug)]
+#[command(
+    about = "Filter TSV rows using boolean expressions",
+    long_about = r#"Filter rows using expressions with column references ($name or $index), comparisons, logical operators, arithmetic, regex (~ and !~), and numeric functions (abs, sqrt, exp, ln, log, log10, log2). Strings require double quotes. Defaults to header-aware mode; add -H for headerless input.
+
+Examples:
+  tsvkit filter -e '$sample2>=5 & $sample3!=9' examples/profiles.tsv
+  tsvkit filter -e '$kingdom ~ "^Bact"' examples/abundance.tsv
+  tsvkit filter -e 'log2($coverage) > 10' reads.tsv"#
+)]
 pub struct FilterArgs {
     /// Input TSV file (use '-' for stdin)
     #[arg(value_name = "FILE", default_value = "-")]
@@ -63,6 +72,7 @@ enum FunctionName {
     Exp,
     Ln,
     Log10,
+    Log2,
 }
 
 impl FunctionName {
@@ -73,8 +83,9 @@ impl FunctionName {
             "exp" => Ok(FunctionName::Exp),
             "ln" => Ok(FunctionName::Ln),
             "log" | "log10" => Ok(FunctionName::Log10),
+            "log2" => Ok(FunctionName::Log2),
             other => bail!(
-                "unsupported function '{}': try abs, sqrt, exp, ln, log, log10",
+                "unsupported function '{}': try abs, sqrt, exp, ln, log, log10, log2",
                 other
             ),
         }
@@ -453,6 +464,15 @@ mod tests {
         let headers = vec!["col1".to_string()];
         let bound = bind_expression(expr, &headers, false).unwrap();
         let record = StringRecord::from(vec!["foo"]);
+        assert!(evaluate(&bound, &record));
+    }
+
+    #[test]
+    fn log2_function_supported() {
+        let expr = parse_expression("log2($1) > 3").unwrap();
+        let headers = vec!["value".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let record = StringRecord::from(vec!["10"]);
         assert!(evaluate(&bound, &record));
     }
 }
@@ -939,6 +959,7 @@ fn eval_value<'a>(value: &'a BoundValue, record: &'a csv::StringRecord) -> EvalV
                     }
                     FunctionName::Ln => (val > 0.0).then(|| val.ln()),
                     FunctionName::Log10 => (val > 0.0).then(|| val.log10()),
+                    FunctionName::Log2 => (val > 0.0).then(|| val.log2()),
                 };
                 result.map(numeric_eval).unwrap_or_else(empty_eval)
             } else {

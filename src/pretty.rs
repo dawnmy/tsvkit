@@ -7,6 +7,10 @@ use clap::Args;
 use crate::common::reader_for_path;
 
 #[derive(Args, Debug)]
+#[command(
+    about = "Render TSV data in a pretty table",
+    long_about = "Format TSV rows into an aligned, boxed table for quick inspection. Reads from files or stdin, keeps headers by default, and supports width control.\n\nExample:\n  tsvkit pretty examples/profiles.tsv"
+)]
 pub struct PrettyArgs {
     /// Input TSV file (use '-' for stdin)
     #[arg(value_name = "FILE", default_value = "-")]
