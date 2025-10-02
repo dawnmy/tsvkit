@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use rayon::prelude::*;
+use num_cpus;
+use rayon::{ThreadPoolBuilder, prelude::*};
 
 use crate::common::{
     ColumnSelector, InputOptions, default_headers, parse_multi_selector_spec, parse_selector_list,
@@ -14,7 +15,7 @@ use crate::common::{
 #[derive(Args, Debug)]
 #[command(
     about = "Join multiple TSV files on shared key columns",
-    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Use -F/--select to control which non-key columns are emitted per file (wrap multi-file specs in quotes). Keys default to an inner join; adjust with -k/--keep. When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f subject_id;subject_id -F 'sample_id,group;age,sex' examples/samples.tsv examples/subjects.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
+    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Use -F/--select to control which non-key columns are emitted per file (wrap multi-file specs in quotes). Keys default to an inner join; adjust with -k/--keep. Control parallel input loading with -t/--threads (defaults to min(8, available CPUs)). When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f subject_id;subject_id -F 'sample_id,group;age,sex' examples/samples.tsv examples/subjects.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
 )]
 pub struct JoinArgs {
     /// Input TSV files to join (use '-' to read from stdin; `.tsv`, `.tsv.gz`, `.tsv.xz` all supported)
@@ -40,6 +41,10 @@ pub struct JoinArgs {
     /// Assume inputs are pre-sorted by key columns and stream without loading entire files (inner/semi joins only)
     #[arg(long = "sorted")]
     pub sorted: bool,
+
+    /// Number of worker threads to use when loading inputs (defaults to min(8, available CPUs))
+    #[arg(short = 't', long = "threads", value_name = "N")]
+    pub threads: Option<usize>,
 
     /// Lines starting with this comment character are skipped (set to an uncommon symbol if your header begins with '#')
     #[arg(
@@ -255,13 +260,25 @@ pub fn run(args: JoinArgs) -> Result<()> {
         args.ignore_illegal_row,
     )?;
 
-    let column_specs = parse_multi_selector_spec(&args.fields, args.files.len())?;
-    validate_join_width(&column_specs)?;
-    let select_specs = parse_select_specs(args.select.as_deref(), args.files.len())?;
+    let threads = match args.threads {
+        Some(value) if value == 0 => bail!("--threads must be greater than zero"),
+        Some(value) => value,
+        None => default_thread_count(),
+    };
 
-    let keep = parse_keep_option(args.keep.as_deref(), args.files.len())?;
+    ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .with_context(|| "failed to initialize thread pool")?
+        .install(|| execute_join(&args, &input_opts))
+}
 
+fn execute_join(args: &JoinArgs, input_opts: &InputOptions) -> Result<()> {
     if args.sorted {
+        let column_specs = parse_multi_selector_spec(&args.fields, args.files.len())?;
+        validate_join_width(&column_specs)?;
+        let select_specs = parse_select_specs(args.select.as_deref(), args.files.len())?;
+        let keep = parse_keep_option(args.keep.as_deref(), args.files.len())?;
         return stream_join(
             &args.files,
             &column_specs,
@@ -269,9 +286,15 @@ pub fn run(args: JoinArgs) -> Result<()> {
             &keep,
             args.no_header,
             !args.no_header,
-            &input_opts,
+            input_opts,
         );
     }
+
+    let column_specs = parse_multi_selector_spec(&args.fields, args.files.len())?;
+    validate_join_width(&column_specs)?;
+    let select_specs = parse_select_specs(args.select.as_deref(), args.files.len())?;
+
+    let keep = parse_keep_option(args.keep.as_deref(), args.files.len())?;
 
     let tables: Vec<Table> = args
         .files
@@ -287,7 +310,7 @@ pub fn run(args: JoinArgs) -> Result<()> {
                 specs,
                 select_for_file,
                 args.no_header,
-                &input_opts,
+                input_opts,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -562,6 +585,11 @@ fn project_record(record: &csv::StringRecord, projection: &[usize]) -> Vec<Strin
         .iter()
         .map(|&idx| record.get(idx).unwrap_or("").to_string())
         .collect()
+}
+
+fn default_thread_count() -> usize {
+    let available = num_cpus::get();
+    std::cmp::max(1, std::cmp::min(8, available))
 }
 
 fn make_key(row: &[String], indices: &[usize]) -> Vec<String> {

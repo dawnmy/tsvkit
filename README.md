@@ -96,6 +96,7 @@ Aggregators support descriptive statistics in `summarize` and row-wise calculati
 - Add `-H/--no-header` when your data lacks a header row; selectors fall back to 1-based indices.
 - Commands are stream-friendly—pipe them freely to build larger workflows.
 - Use `-C/--comment-char`, `-E/--ignore-empty-row`, and `-I/--ignore-illegal-row` on any subcommand to control how input lines are filtered before processing.
+- `tsvkit join` parallelizes input loading; control the worker count with `-t/--threads` (defaults to the lesser of 8 and the available CPU cores).
 
 ---
 
@@ -142,6 +143,8 @@ tsvkit join -f subject_id examples/samples.tsv examples/subjects.tsv
 Control join type with `-k` (`-k 0` = full outer). Pick which columns from each file to emit with `-F/--select`; by default every non-key column from every file is included. The selector syntax matches `-f`: separate per-file specs with semicolons (`samples_cols;subjects_cols`), and within each spec use commas/ranges to list the columns you want to keep. Add `--sorted` to stream when inputs are pre-sorted on the key.
 
 `tsvkit join` also prunes unneeded input columns before building its data structures, so selecting a narrower set of outputs can significantly reduce memory and runtime.
+
+By default join will use up to 8 threads to load inputs; override with `-t/--threads N` when you want a different level of parallelism.
 
 ### `mutate`
 

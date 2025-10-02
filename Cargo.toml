@@ -1,6 +1,6 @@
 [package]
 name = "tsvkit"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 
 [dependencies]
@@ -13,3 +13,4 @@ regex = "1"
 flate2 = "1"
 xz2 = "0.1"
 rayon = "1"
+num_cpus = "1"
