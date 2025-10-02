@@ -6,13 +6,14 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::common::{
-    ColumnSelector, default_headers, parse_multi_selector_spec, reader_for_path, resolve_selectors,
+    ColumnSelector, default_headers, parse_multi_selector_spec, parse_selector_list,
+    reader_for_path, resolve_selectors,
 };
 
 #[derive(Args, Debug)]
 #[command(
     about = "Join multiple TSV files on shared key columns",
-    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Use -s/--select to control which non-key columns are emitted per file. Keys default to an inner join; adjust with -k/--keep. When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f subject_id;subject_id -s 'sample_id,group;age,sex' examples/samples.tsv examples/subjects.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
+    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Use -s/--select to control which non-key columns are emitted per file (wrap multi-file specs in quotes). Keys default to an inner join; adjust with -k/--keep. When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f subject_id;subject_id -s 'sample_id,group;age,sex' examples/samples.tsv examples/subjects.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
 )]
 pub struct JoinArgs {
     /// Input TSV files to join (use '-' to read from stdin; `.tsv`, `.tsv.gz`, `.tsv.xz` all supported)
@@ -23,7 +24,7 @@ pub struct JoinArgs {
     #[arg(short = 'f', long = "fields", value_name = "SPEC", required = true)]
     pub fields: String,
 
-    /// Additional columns to emit from each file after the join (same selector format as --fields). Defaults to all non-key columns.
+    /// Additional columns to emit from each file after the join (same selector format as --fields). Wrap the spec in quotes when using ';'. Defaults to all non-key columns.
     #[arg(short = 's', long = "select", value_name = "SPEC")]
     pub select: Option<String>,
 
@@ -208,11 +209,7 @@ pub fn run(args: JoinArgs) -> Result<()> {
 
     let column_specs = parse_multi_selector_spec(&args.fields, args.files.len())?;
     validate_join_width(&column_specs)?;
-    let select_specs = if let Some(spec) = args.select.as_deref() {
-        Some(parse_multi_selector_spec(spec, args.files.len())?)
-    } else {
-        None
-    };
+    let select_specs = parse_select_specs(args.select.as_deref(), args.files.len())?;
 
     let keep = parse_keep_option(args.keep.as_deref(), args.files.len())?;
 
@@ -220,7 +217,7 @@ pub fn run(args: JoinArgs) -> Result<()> {
         return stream_join(
             &args.files,
             &column_specs,
-            select_specs.as_deref(),
+            &select_specs,
             &keep,
             args.no_header,
             !args.no_header,
@@ -232,9 +229,7 @@ pub fn run(args: JoinArgs) -> Result<()> {
         let specs = column_specs
             .get(idx)
             .context("missing column specification for file")?;
-        let select_for_file = select_specs
-            .as_deref()
-            .and_then(|all| all.get(idx).map(|v| v.as_slice()));
+        let select_for_file = select_specs[idx].as_ref().map(|v| v.as_slice());
         let table = load_table(path, specs, select_for_file, args.no_header)?;
         tables.push(table);
     }
@@ -340,6 +335,48 @@ fn validate_join_width(column_specs: &[Vec<ColumnSelector>]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_select_specs(
+    spec: Option<&str>,
+    file_count: usize,
+) -> Result<Vec<Option<Vec<ColumnSelector>>>> {
+    if file_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let raw = match spec.map(|s| s.trim()) {
+        None | Some("") => return Ok(vec![None; file_count]),
+        Some(text) => text,
+    };
+
+    let parts: Vec<&str> = raw.split(';').map(|s| s.trim()).collect();
+
+    if parts.len() == 1 && file_count > 1 {
+        let part = parts[0];
+        if part.is_empty() {
+            return Ok(vec![None; file_count]);
+        }
+        let parsed = parse_selector_list(part)?;
+        return Ok(vec![Some(parsed); file_count]);
+    }
+
+    if parts.len() != file_count {
+        bail!(
+            "expected column specification for each file, got {}",
+            parts.len()
+        );
+    }
+
+    let mut result = Vec::with_capacity(file_count);
+    for part in parts {
+        if part.is_empty() {
+            result.push(None);
+        } else {
+            result.push(Some(parse_selector_list(part)?));
+        }
+    }
+    Ok(result)
 }
 
 fn make_key(row: &[String], indices: &[usize]) -> Vec<String> {
@@ -520,7 +557,7 @@ fn build_key_list(tables: &[Table], keep: &KeepStrategy) -> Vec<Vec<String>> {
 fn stream_join(
     files: &[PathBuf],
     column_specs: &[Vec<ColumnSelector>],
-    select_specs: Option<&[Vec<ColumnSelector>]>,
+    select_specs: &[Option<Vec<ColumnSelector>>],
     keep: &KeepStrategy,
     no_header: bool,
     has_header: bool,
@@ -530,7 +567,9 @@ fn stream_join(
         let selectors = column_specs
             .get(idx)
             .context("missing column specification for file")?;
-        let select_for_file = select_specs.and_then(|all| all.get(idx).map(|v| v.as_slice()));
+        let select_for_file = select_specs
+            .get(idx)
+            .and_then(|opt| opt.as_ref().map(|v| v.as_slice()));
         let table = StreamTable::new(path, selectors, select_for_file, no_header)?;
         tables.push(table);
     }

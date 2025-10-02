@@ -6,11 +6,12 @@ use clap::Args;
 use regex::Regex;
 
 use crate::common::{default_headers, parse_selector_list, reader_for_path, resolve_selectors};
+use crate::expression::{BoundValue, bind_value_expression, eval_value, parse_value_expression};
 
 #[derive(Args, Debug)]
 #[command(
     about = "Create or transform TSV columns",
-    long_about = r#"Add derived columns or rewrite existing ones. Use -e/--expr to specify operations. Assignments take the form name=FUNC(args...), where FUNC can be row-wise aggregates (sum, mean, median, sd, q1–q4, q0.25, p95, etc.) or string helpers like sub(). You can also run in-place substitutions with sed-style syntax s/selectors/pattern/replacement/.
+    long_about = r#"Add derived columns or rewrite existing ones. Use -e/--expr to specify operations. Assignments can be arbitrary expressions (`name=EXPR`) using the filter expression language (column selectors, arithmetic, abs/sqrt/exp/ln/log/log2/log10/exp2, regex matches, etc.), row-wise aggregates (sum, mean, median, sd, q1–q4, q0.25, p95, etc.), or string helpers like sub(). You can also run in-place substitutions with sed-style syntax s/selectors/pattern/replacement/.
 
 Examples:
   tsvkit mutate -e "coverage_sum=sum($1,$3:$5)" examples/profiles.tsv
@@ -23,7 +24,7 @@ pub struct MutateArgs {
     #[arg(value_name = "FILE", default_value = "-")]
     pub file: PathBuf,
 
-    /// Mutation expression, repeatable. Use `name=FUNC(args...)` for new columns (sum/mean/median/sd/q*/p*/sub) or `s/selectors/pattern/replacement/` for in-place substitution.
+    /// Mutation expression, repeatable. Use `name=EXPR` for derived columns (expressions, aggregates, sub()) or `s/selectors/pattern/replacement/` for in-place substitution.
     #[arg(short = 'e', long = "expr", value_name = "EXPR", required = true)]
     pub exprs: Vec<String>,
 
@@ -119,6 +120,10 @@ fn process_row(row: &mut Vec<String>, ops: &[MutateOp]) -> Result<()> {
 
 fn evaluate_function(func: &FunctionSpec, row: &[String]) -> Result<String> {
     match func {
+        FunctionSpec::Expression { expr } => {
+            let evaluated = eval_value(expr, row);
+            Ok(evaluated.text.into_owned())
+        }
         FunctionSpec::Aggregate { kind, columns } => {
             let values = collect_numeric(row, columns);
             if values.is_empty() {
@@ -198,7 +203,9 @@ fn parse_assignment_expression(
 }
 
 fn parse_function(value: &str, headers: &[String], no_header: bool) -> Result<FunctionSpec> {
-    if let Some(rest) = value.strip_prefix("sub(") {
+    let trimmed = value.trim();
+
+    if let Some(rest) = trimmed.strip_prefix("sub(") {
         let inner = rest
             .strip_suffix(')')
             .with_context(|| "sub() expression must end with ')'")?;
@@ -222,28 +229,32 @@ fn parse_function(value: &str, headers: &[String], no_header: bool) -> Result<Fu
         });
     }
 
-    let open_idx = value
-        .find('(')
-        .with_context(|| "function call must include parentheses")?;
-    let func_name = value[..open_idx].trim();
-    let inner = value
-        .strip_prefix(&format!("{}(", func_name))
-        .and_then(|s| s.strip_suffix(')'))
-        .with_context(|| "function call must end with ')'")?;
-    let args_str = inner.trim();
-    let selectors = parse_selector_list(&normalize_selector_spec(args_str))?;
-    if selectors.is_empty() {
-        bail!(
-            "function '{}' expects at least one column selector",
-            func_name
-        );
+    if let Some(open_idx) = trimmed.find('(') {
+        let func_name = trimmed[..open_idx].trim();
+        if let Ok(kind) = parse_aggregate_kind(func_name) {
+            let inner = trimmed
+                .strip_prefix(&format!("{}(", func_name))
+                .and_then(|s| s.strip_suffix(')'))
+                .with_context(|| "function call must end with ')'")?;
+            let args_str = inner.trim();
+            let selectors = parse_selector_list(&normalize_selector_spec(args_str))?;
+            if selectors.is_empty() {
+                bail!(
+                    "function '{}' expects at least one column selector",
+                    func_name
+                );
+            }
+            let indices = resolve_selectors(headers, &selectors, no_header)?;
+            return Ok(FunctionSpec::Aggregate {
+                kind,
+                columns: indices,
+            });
+        }
     }
-    let indices = resolve_selectors(headers, &selectors, no_header)?;
-    let kind = parse_aggregate_kind(func_name)?;
-    Ok(FunctionSpec::Aggregate {
-        kind,
-        columns: indices,
-    })
+
+    let expr = parse_value_expression(trimmed)?;
+    let bound = bind_value_expression(expr, headers, no_header)?;
+    Ok(FunctionSpec::Expression { expr: bound })
 }
 
 fn parse_substitution_expression(
@@ -464,6 +475,9 @@ enum MutateOp {
 
 #[derive(Debug)]
 enum FunctionSpec {
+    Expression {
+        expr: BoundValue,
+    },
     Aggregate {
         kind: AggregateKind,
         columns: Vec<usize>,
@@ -503,5 +517,22 @@ mod tests {
     fn split_args_handles_quotes() {
         let args = split_args("$col1, \"a,b\", \"c\"");
         assert_eq!(args, vec!["$col1", "\"a,b\"", "\"c\""]);
+    }
+
+    #[test]
+    fn expression_assignment_uses_filter_language() {
+        let headers = vec!["dna_ug".to_string(), "rna_ug".to_string()];
+        let ops = parse_operations(
+            &vec!["ee=exp($dna_ug) - exp2($rna_ug)".to_string()],
+            &headers,
+            false,
+        )
+        .unwrap();
+        let mut row = vec!["1.0".to_string(), "2.0".to_string()];
+        process_row(&mut row, &ops).unwrap();
+        assert_eq!(row.len(), 3);
+        let value: f64 = row[2].parse().unwrap();
+        let expected = 1.0f64.exp() - 2.0f64.exp2();
+        assert!((value - expected).abs() < 1e-6);
     }
 }

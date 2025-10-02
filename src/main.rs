@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod common;
 mod cut;
+mod expression;
 mod filter;
 mod join;
 mod melt;

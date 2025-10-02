@@ -36,8 +36,8 @@ Join sample and subject metadata, derive a total cytokine score, filter high-pur
 
 ```bash
 cat examples/cytokines.tsv \
-  | tsvkit mutate -e "total=sum($IL6:$IL10)" -e "log_total=log2(total)" \
-  | tsvkit join -f sample_id;sample_id -k 0 - examples/samples.tsv \
+  | tsvkit mutate -e 'total=sum($IL6:$IL10)' -e 'log_total=log2(total)' \
+  | tsvkit join -f 'sample_id;sample_id' -k 0 - examples/samples.tsv \
   | tsvkit filter -e '$group == "case" & $purity >= 0.94' \
   | tsvkit pretty
 ```
@@ -52,11 +52,11 @@ Each subsection highlights the core options and shows realistic invocations usin
 
 ### `join`
 
-Merge TSV files on key columns. Provide selectors with `-f/--fields`; when all files use the same key, specify it once. Every file must contribute the same number of key columns. Use `-s/--select` to control which non-key columns are emitted per file (defaults to all). Provide selectors with `-f/--fields`; when all files use the same key, specify it once. Every file must contribute the same number of key columns.
+Merge TSV files on key columns. Provide selectors with `-f/--fields`; when all files use the same key, specify it once. Every file must contribute the same number of key columns. Use `-s/--select` to control which non-key columns are emitted per file (defaults to all).
 
 ```bash
 tsvkit join \
-  -f subject_id;subject_id \
+  -f 'subject_id;subject_id' \
   examples/samples.tsv examples/subjects.tsv
 ```
 _Output (first rows)_
@@ -72,7 +72,7 @@ Limit the output columns per file with `-s/--select` (same syntax as `-f/--field
 
 ```bash
 tsvkit join \
-  -f subject_id;subject_id \
+  -f 'subject_id;subject_id' \
   -s 'sample_id,group;age,sex' \
   examples/samples.tsv examples/subjects.tsv
 ```
@@ -83,9 +83,9 @@ Create new columns or rewrite existing ones with row-wise expressions. Numeric h
 
 ```bash
 tsvkit mutate \
-  -e "total_cytokines=sum($IL6:$IL10)" \
-  -e "scaled=mean($IL6:$IL10)" \
-  -e "label=sub($sample_id,\"S\",\"Sample_\")" \
+  -e 'total_cytokines=sum($IL6:$IL10)' \
+  -e 'scaled=mean($IL6:$IL10)' \
+  -e 'label=sub($sample_id,"S","Sample_")' \
   examples/cytokines.tsv
 ```
 _Output_
@@ -143,10 +143,10 @@ tsvkit filter \
   examples/samples.tsv
 ```
 
-Regex operators `~` and `!~` make pattern filters concise:
+Regex operators `~` and `!~` make pattern filters concise (use double quotes for literal substrings, `/regex/` for patterns):
 
 ```bash
-tsvkit filter -e '$tech ~ ^sRNA' examples/samples.tsv
+tsvkit filter -e '$tech ~ "sRNA"' examples/samples.tsv
 ```
 
 ### `cut`
@@ -240,7 +240,7 @@ tsvkit filter -e '$group == "case"' examples/samples.tsv \
 ## Advanced Tips
 
 - **Compressed input**: `tsvkit` automatically detects `.gz` and `.xz` files. Pipe from `curl`/`zcat` for other formats.
-- **Column selectors**: Anywhere you select columns you can use names, 1-based indices, ranges (`colA:colD`, `2:6`), or mixes (`$sample1:$sample3,$dna_ug`).
+- **Column selectors**: Anywhere you select columns you can use names, 1-based indices, ranges (`colA:colD`, `2:6`), or mixes (`$sample1:$sample3,$dna_ug`). Always quote expressions containing `$` in your shell (e.g. use single quotes) so column references are not expanded.
 - **Expressions**: Numeric functions ignore empty/non-numeric values; string helpers understand double-quoted literals with standard escapes.
 - **Streaming joins**: Combine `sort` + `join --sorted` to handle very large datasets with constant memory.
 
