@@ -1,9 +1,11 @@
 use std::fs::File;
-use std::io;
+use std::io::{self, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use csv::ReaderBuilder;
+use flate2::read::MultiGzDecoder;
+use xz2::read::XzDecoder;
 
 #[derive(Debug, Clone)]
 pub enum ColumnSelector {
@@ -105,7 +107,18 @@ pub fn reader_for_path(path: &Path, no_header: bool) -> Result<csv::Reader<Box<d
     let reader: Box<dyn io::Read> = if path == Path::new("-") {
         Box::new(io::stdin().lock())
     } else {
-        Box::new(File::open(path).with_context(|| format!("failed to open {}", path.display()))?)
+        let file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        match ext.as_str() {
+            "gz" => Box::new(MultiGzDecoder::new(file)),
+            "xz" => Box::new(XzDecoder::new(file)),
+            _ => Box::new(BufReader::new(file)),
+        }
     };
 
     Ok(ReaderBuilder::new()

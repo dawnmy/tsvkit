@@ -13,27 +13,27 @@ use crate::common::{default_headers, parse_selector_list, reader_for_path, resol
     long_about = "Convert wide TSV tables into a tidy long format. Use -i/--id to keep identifier columns, optionally -v/--value-cols to target specific value columns, and rename the generated columns with --variable/--value. Defaults to header-aware mode; add -H for headerless files.\n\nExample:\n  tsvkit melt -i id examples/profiles.tsv"
 )]
 pub struct MeltArgs {
-    /// Input TSV file (use '-' for stdin)
+    /// Input TSV file (use '-' for stdin; gz/xz supported)
     #[arg(value_name = "FILE", default_value = "-")]
     pub file: PathBuf,
 
-    /// Identifier columns to keep (comma-separated)
+    /// Identifier columns to keep in the long output (optional; names/indices/ranges)
     #[arg(short = 'i', long = "id", value_name = "COLS")]
     pub id_cols: Option<String>,
 
-    /// Columns to unpivot (comma-separated). Defaults to all non-id columns.
+    /// Columns to melt (comma-separated names/indices/ranges). Defaults to all non-id columns.
     #[arg(short = 'v', long = "value-cols", value_name = "COLS")]
     pub value_cols: Option<String>,
 
-    /// Name for the variable column in the output
+    /// Column name for melted variable labels (default `variable`)
     #[arg(long = "variable", value_name = "NAME", default_value = "variable")]
     pub variable_name: String,
 
-    /// Name for the value column in the output
+    /// Column name for melted values (default `value`)
     #[arg(long = "value", value_name = "NAME", default_value = "value")]
     pub value_name: String,
 
-    /// Treat input as having no header row
+    /// Treat input as headerless (columns referenced by indices only)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
 }

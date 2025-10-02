@@ -17,19 +17,19 @@ use crate::common::{
     long_about = "Group rows with -g/--group and compute statistics for selected columns via -s/--stat. Each --stat accepts COLUMN=ops, where COLUMN can be names, indices, ranges, or mixes, and ops include sum, mean, median, quantiles (q1, q50, q0.9), var, sd, mode, distinct, and more. Headers are used by default; add -H for headerless input.\n\nExamples:\n  tsvkit summarize -s 'sample1:sample3=mean' examples/profiles.tsv\n  tsvkit summarize -g group -s 'sample1=mean,sd' -s 'sample2:sample3=sum' examples/profiles.tsv\n  tsvkit summarize -s 'sample1=q1,q3,var' examples/profiles.tsv"
 )]
 pub struct SummarizeArgs {
-    /// Input TSV file (use '-' for stdin)
+    /// Input TSV file (use '-' for stdin; compressed files are detected automatically)
     #[arg(value_name = "FILE", default_value = "-")]
     pub file: PathBuf,
 
-    /// Group by columns (comma-separated names or 1-based indices)
+    /// Columns to group by (comma-separated names/indices/ranges). Omit to aggregate the entire table as one group.
     #[arg(short = 'g', long = "group", value_name = "COLS")]
     pub group_cols: Option<String>,
 
-    /// Statistics to compute, e.g. "value=sum,mean" (repeatable)
+    /// Statistics to compute (`COLUMN=ops`). Columns accept names, indices, ranges (e.g. `IL6:IL10`); operations are comma-separated (sum, mean, median, sd, var, min, max, mode, distinct, q*/p* aliases). Repeatable.
     #[arg(short = 's', long = "stat", value_name = "COLUMN=OPS", required = true)]
     pub stats: Vec<String>,
 
-    /// Treat input as having no header row
+    /// Treat the input as headerless (columns referenced by 1-based indices)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
 }

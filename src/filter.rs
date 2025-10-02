@@ -20,15 +20,15 @@ Examples:
   tsvkit filter -e 'log2($coverage) > 10' reads.tsv"#
 )]
 pub struct FilterArgs {
-    /// Input TSV file (use '-' for stdin)
+    /// Input TSV file (use '-' for stdin; compressed files supported)
     #[arg(value_name = "FILE", default_value = "-")]
     pub file: PathBuf,
 
-    /// Filter expression, e.g. "$2>=10 & $1<=-1"
+    /// Filter expression (e.g. `$purity>=0.9 & log2($dna_ug)>4`); supports `$col`/`$1` selectors, comparisons, arithmetic, regex (~ / !~), and functions (abs, sqrt, exp, ln, log, log10, log2)
     #[arg(short = 'e', long = "expr", value_name = "EXPR", required = true)]
     pub expr: String,
 
-    /// Treat input as having no header row
+    /// Treat input as headerless (columns become 1-based indices only)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
 }

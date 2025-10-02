@@ -1,0 +1,5 @@
+subject_id	age	sex	site	bmi	smoker_status
+P001	45	F	Seattle	27.1	former
+P002	52	M	Seattle	31.4	never
+P003	38	F	Portland	24.3	current
+P004	60	M	Boise	29.0	former

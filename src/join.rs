@@ -12,26 +12,30 @@ use crate::common::{
 #[derive(Args, Debug)]
 #[command(
     about = "Join multiple TSV files on shared key columns",
-    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Keys default to an inner join; adjust with -k/--keep. When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
+    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Use -s/--select to control which non-key columns are emitted per file. Keys default to an inner join; adjust with -k/--keep. When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f subject_id;subject_id -s 'sample_id,group;age,sex' examples/samples.tsv examples/subjects.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
 )]
 pub struct JoinArgs {
-    /// Input TSV files (use '-' for stdin)
+    /// Input TSV files to join (use '-' to read from stdin; `.tsv`, `.tsv.gz`, `.tsv.xz` all supported)
     #[arg(value_name = "FILES", required = true)]
     pub files: Vec<PathBuf>,
 
-    /// Join field specification, e.g. "id" or "id;name;ID" for different files
+    /// Join field specification; provide comma-separated selectors per file and separate files with ';' (e.g. `id,name;id,name`). Each file must contribute the same number of join columns.
     #[arg(short = 'f', long = "fields", value_name = "SPEC", required = true)]
     pub fields: String,
 
-    /// Treat input as having no header row
+    /// Additional columns to emit from each file after the join (same selector format as --fields). Defaults to all non-key columns.
+    #[arg(short = 's', long = "select", value_name = "SPEC")]
+    pub select: Option<String>,
+
+    /// Treat input files as headerless (columns become 1-based indices like `1`, `2`, ...)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
 
-    /// Join strategy: default inner; use 0 for full outer or comma-separated file numbers to keep keys from those files
+    /// Join strategy: omit for inner joins; use `0` for full outer joins or comma-separated 1-based file numbers (e.g. `1,3`) to keep keys from specific inputs
     #[arg(short = 'k', long = "keep", value_name = "SPEC")]
     pub keep: Option<String>,
 
-    /// Assume inputs are sorted by the join keys and stream the join without buffering entire files
+    /// Assume inputs are pre-sorted by key columns and stream without loading entire files (inner/semi joins only)
     #[arg(long = "sorted")]
     pub sorted: bool,
 }
@@ -72,7 +76,12 @@ struct RowGroup {
 }
 
 impl StreamTable {
-    fn new(path: &Path, selectors: &[ColumnSelector], no_header: bool) -> Result<Self> {
+    fn new(
+        path: &Path,
+        selectors: &[ColumnSelector],
+        selected_columns: Option<&[ColumnSelector]>,
+        no_header: bool,
+    ) -> Result<Self> {
         let mut reader = reader_for_path(path, no_header)?;
         let source = path.display().to_string();
 
@@ -100,17 +109,18 @@ impl StreamTable {
 
         let join_indices = resolve_selectors(&headers, selectors, no_header)?;
         let join_set: HashSet<usize> = join_indices.iter().cloned().collect();
-        let include_indices = headers
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, _)| {
-                if join_set.contains(&idx) {
-                    None
-                } else {
-                    Some(idx)
-                }
-            })
-            .collect::<Vec<_>>();
+        let include_indices = if let Some(cols) = selected_columns {
+            resolve_selectors(&headers, cols, no_header)?
+                .into_iter()
+                .filter(|idx| !join_set.contains(idx))
+                .collect()
+        } else {
+            headers
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, _)| (!join_set.contains(&idx)).then_some(idx))
+                .collect::<Vec<_>>()
+        };
         let empty_row = vec![String::new(); width];
 
         let mut table = StreamTable {
@@ -198,6 +208,11 @@ pub fn run(args: JoinArgs) -> Result<()> {
 
     let column_specs = parse_multi_selector_spec(&args.fields, args.files.len())?;
     validate_join_width(&column_specs)?;
+    let select_specs = if let Some(spec) = args.select.as_deref() {
+        Some(parse_multi_selector_spec(spec, args.files.len())?)
+    } else {
+        None
+    };
 
     let keep = parse_keep_option(args.keep.as_deref(), args.files.len())?;
 
@@ -205,6 +220,7 @@ pub fn run(args: JoinArgs) -> Result<()> {
         return stream_join(
             &args.files,
             &column_specs,
+            select_specs.as_deref(),
             &keep,
             args.no_header,
             !args.no_header,
@@ -216,14 +232,22 @@ pub fn run(args: JoinArgs) -> Result<()> {
         let specs = column_specs
             .get(idx)
             .context("missing column specification for file")?;
-        let table = load_table(path, specs, args.no_header)?;
+        let select_for_file = select_specs
+            .as_deref()
+            .and_then(|all| all.get(idx).map(|v| v.as_slice()));
+        let table = load_table(path, specs, select_for_file, args.no_header)?;
         tables.push(table);
     }
 
     output_joined(tables, &keep, !args.no_header)
 }
 
-fn load_table(path: &Path, selectors: &[ColumnSelector], no_header: bool) -> Result<Table> {
+fn load_table(
+    path: &Path,
+    selectors: &[ColumnSelector],
+    selected_columns: Option<&[ColumnSelector]>,
+    no_header: bool,
+) -> Result<Table> {
     let mut reader = reader_for_path(path, no_header)?;
 
     let (headers, rows) = if no_header {
@@ -257,19 +281,20 @@ fn load_table(path: &Path, selectors: &[ColumnSelector], no_header: bool) -> Res
     }
 
     let join_indices = resolve_selectors(&headers, selectors, no_header)?;
-
     let join_set: HashSet<usize> = join_indices.iter().cloned().collect();
-    let include_indices = headers
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, _)| {
-            if join_set.contains(&idx) {
-                None
-            } else {
-                Some(idx)
-            }
-        })
-        .collect::<Vec<_>>();
+
+    let include_indices = if let Some(cols) = selected_columns {
+        resolve_selectors(&headers, cols, no_header)?
+            .into_iter()
+            .filter(|idx| !join_set.contains(idx))
+            .collect()
+    } else {
+        headers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, _)| (!join_set.contains(&idx)).then_some(idx))
+            .collect::<Vec<_>>()
+    };
 
     let empty_row = vec![String::new(); headers.len()];
     let mut key_to_rows: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
@@ -495,6 +520,7 @@ fn build_key_list(tables: &[Table], keep: &KeepStrategy) -> Vec<Vec<String>> {
 fn stream_join(
     files: &[PathBuf],
     column_specs: &[Vec<ColumnSelector>],
+    select_specs: Option<&[Vec<ColumnSelector>]>,
     keep: &KeepStrategy,
     no_header: bool,
     has_header: bool,
@@ -504,7 +530,8 @@ fn stream_join(
         let selectors = column_specs
             .get(idx)
             .context("missing column specification for file")?;
-        let table = StreamTable::new(path, selectors, no_header)?;
+        let select_for_file = select_specs.and_then(|all| all.get(idx).map(|v| v.as_slice()));
+        let table = StreamTable::new(path, selectors, select_for_file, no_header)?;
         tables.push(table);
     }
 

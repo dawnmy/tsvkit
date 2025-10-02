@@ -12,15 +12,15 @@ use crate::common::{default_headers, parse_selector_list, reader_for_path, resol
     long_about = "Pick columns by name or 1-based index. Combine comma-separated selectors with ranges (colA:colD or 2:6) and single fields in one spec. Defaults to header-aware mode; add -H for headerless input.\n\nExamples:\n  tsvkit cut -f id,sample3,sample1 examples/profiles.tsv\n  tsvkit cut -f 'Purity,sample:FN,F1' examples/profiles.tsv\n  tsvkit cut -H -f 3,1 data.tsv"
 )]
 pub struct CutArgs {
-    /// Input TSV file (use '-' for stdin)
+    /// Input TSV file (use '-' for stdin; supports gz/xz)
     #[arg(value_name = "FILE", default_value = "-")]
     pub file: PathBuf,
 
-    /// Fields to select (comma-separated names or 1-based indices)
+    /// Fields to select, using names, 1-based indices, ranges (`colA:colD`, `2:5`), or mixes. Comma-separated list.
     #[arg(short = 'f', long = "fields", value_name = "COLS", required = true)]
     pub fields: String,
 
-    /// Treat input as having no header row
+    /// Treat the input as headerless (columns referenced by 1-based indices)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
 }

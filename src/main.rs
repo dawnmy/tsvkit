@@ -6,8 +6,10 @@ mod cut;
 mod filter;
 mod join;
 mod melt;
+mod mutate;
 mod pivot;
 mod pretty;
+mod slice;
 mod sort;
 mod summarize;
 
@@ -42,6 +44,10 @@ enum Commands {
     Melt(melt::MeltArgs),
     /// Sort rows by one or more key columns
     Sort(sort::SortArgs),
+    /// Add derived columns or rewrite existing ones
+    Mutate(mutate::MutateArgs),
+    /// Slice rows by 1-based index
+    Slice(slice::SliceArgs),
 }
 
 fn main() -> Result<()> {
@@ -55,5 +61,7 @@ fn main() -> Result<()> {
         Commands::Pivot(args) => pivot::run(args),
         Commands::Melt(args) => melt::run(args),
         Commands::Sort(args) => sort::run(args),
+        Commands::Mutate(args) => mutate::run(args),
+        Commands::Slice(args) => slice::run(args),
     }
 }

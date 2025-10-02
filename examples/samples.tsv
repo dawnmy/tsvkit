@@ -1,0 +1,7 @@
+sample_id	subject_id	group	timepoint	purity	dna_ug	rna_ug	contamination_pct	tech
+S01	P001	case	baseline	0.94	25.3	18.1	0.02	sRNA-seq
+S02	P002	control	baseline	0.90	22.8	17.5	0.03	sRNA-seq
+S03	P001	case	week4	0.96	27.4	19.8	0.01	sRNA-seq
+S04	P003	case	baseline	0.88	20.1	16.2	0.05	nanopore
+S05	P002	control	week4	0.92	24.0	17.9	0.02	sRNA-seq
+S06	P004	control	baseline	0.91	23.7	17.2	0.04	nanopore

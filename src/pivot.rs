@@ -15,27 +15,27 @@ use crate::common::{
     long_about = "Convert long (tidy) TSV data into a wide table by promoting row values to columns. Specify which columns remain as identifiers (-i/--index), which column provides the new headers (-c/--column), and which supplies cell values (-v/--value). Use --fill for missing combinations.\n\nExample:\n  tsvkit melt -i id examples/profiles.tsv | tsvkit pivot -i id -c variable -v value"
 )]
 pub struct PivotArgs {
-    /// Input TSV file (use '-' for stdin)
+    /// Input TSV file (use '-' for stdin; gz/xz supported)
     #[arg(value_name = "FILE", default_value = "-")]
     pub file: PathBuf,
 
-    /// Index columns to keep (comma-separated)
+    /// Identifier columns to keep (comma-separated names/indices/ranges)
     #[arg(short = 'i', long = "index", value_name = "COLS", required = true)]
     pub index_cols: String,
 
-    /// Column containing the names for pivoted columns
+    /// Column whose values become new column names in the output (single selector)
     #[arg(short = 'c', long = "column", value_name = "COL", required = true)]
     pub column: String,
 
-    /// Column providing the values for the pivoted cells
+    /// Column whose values populate the pivoted cells (single selector)
     #[arg(short = 'v', long = "value", value_name = "COL", required = true)]
     pub value: String,
 
-    /// Fill value when a combination is missing (default empty string)
+    /// Fill value to use for missing combinations (defaults to empty string)
     #[arg(long = "fill", value_name = "TEXT")]
     pub fill: Option<String>,
 
-    /// Treat input as having no header row
+    /// Treat the input as headerless (columns referenced by indices only)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
 }

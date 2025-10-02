@@ -16,19 +16,19 @@ use crate::common::{
     long_about = "Sort TSV rows by one or more keys. Provide -k/--key with column selectors (names or 1-based indices) and optional modifiers: :n (numeric asc), :nr (numeric desc), :r (reverse text). Repeat -k for additional sort levels. Defaults to header-aware mode; add -H for headerless files.\n\nExamples:\n  tsvkit sort -k count:nr examples/abundance.tsv\n  tsvkit sort -k $1:nr -k $2:r examples/profiles.tsv"
 )]
 pub struct SortArgs {
-    /// Input TSV file (use '-' for stdin)
+    /// Input TSV file (use '-' for stdin; gz/xz supported)
     #[arg(value_name = "FILE", default_value = "-")]
     pub file: PathBuf,
 
-    /// Sort key specification: column[:asc|desc][:num|str]
+    /// Sort key specification (`column[:modifier]`). Select columns by name, index, or range; modifiers include `:n` (numeric asc), `:nr` (numeric desc), `:r` (reverse text). Repeat flag for secondary keys.
     #[arg(short = 'k', long = "key", value_name = "SPEC", required = true)]
     pub keys: Vec<String>,
 
-    /// Treat input as having no header row
+    /// Treat input as headerless (columns referenced by indices only)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
 
-    /// Use an unstable sort (faster but may reorder equal rows)
+    /// Use an unstable sort (faster but does not preserve order of equal keys)
     #[arg(long = "unstable")]
     pub unstable: bool,
 }
