@@ -6,14 +6,14 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::common::{
-    ColumnSelector, default_headers, parse_multi_selector_spec, parse_selector_list,
-    reader_for_path, resolve_selectors,
+    ColumnSelector, InputOptions, default_headers, parse_multi_selector_spec, parse_selector_list,
+    reader_for_path, resolve_selectors, should_skip_record,
 };
 
 #[derive(Args, Debug)]
 #[command(
     about = "Join multiple TSV files on shared key columns",
-    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Use -s/--select to control which non-key columns are emitted per file (wrap multi-file specs in quotes). Keys default to an inner join; adjust with -k/--keep. When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f subject_id;subject_id -s 'sample_id,group;age,sex' examples/samples.tsv examples/subjects.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
+    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Use -F/--select to control which non-key columns are emitted per file (wrap multi-file specs in quotes). Keys default to an inner join; adjust with -k/--keep. When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f subject_id;subject_id -F 'sample_id,group;age,sex' examples/samples.tsv examples/subjects.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
 )]
 pub struct JoinArgs {
     /// Input TSV files to join (use '-' to read from stdin; `.tsv`, `.tsv.gz`, `.tsv.xz` all supported)
@@ -24,8 +24,8 @@ pub struct JoinArgs {
     #[arg(short = 'f', long = "fields", value_name = "SPEC", required = true)]
     pub fields: String,
 
-    /// Additional columns to emit from each file after the join (same selector format as --fields). Wrap the spec in quotes when using ';'. Defaults to all non-key columns.
-    #[arg(short = 's', long = "select", value_name = "SPEC")]
+    /// Columns to emit from each file after the join (same selector format as --fields). Wrap the spec in quotes when using ';'. Defaults to all non-key columns.
+    #[arg(short = 'F', long = "select", value_name = "SPEC")]
     pub select: Option<String>,
 
     /// Treat input files as headerless (columns become 1-based indices like `1`, `2`, ...)
@@ -39,6 +39,23 @@ pub struct JoinArgs {
     /// Assume inputs are pre-sorted by key columns and stream without loading entire files (inner/semi joins only)
     #[arg(long = "sorted")]
     pub sorted: bool,
+
+    /// Lines starting with this comment character are skipped (set to an uncommon symbol if your header begins with '#')
+    #[arg(
+        short = 'C',
+        long = "comment-char",
+        value_name = "CHAR",
+        default_value = "#"
+    )]
+    pub comment_char: String,
+
+    /// Ignore rows where every field is empty/whitespace
+    #[arg(short = 'E', long = "ignore-empty-row")]
+    pub ignore_empty_row: bool,
+
+    /// Ignore rows whose column count differs from the header/first row
+    #[arg(short = 'I', long = "ignore-illegal-row")]
+    pub ignore_illegal_row: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +85,7 @@ struct StreamTable {
     pending: Option<csv::StringRecord>,
     width: usize,
     source: String,
+    input_opts: InputOptions,
 }
 
 #[derive(Clone)]
@@ -82,21 +100,45 @@ impl StreamTable {
         selectors: &[ColumnSelector],
         selected_columns: Option<&[ColumnSelector]>,
         no_header: bool,
+        input_opts: &InputOptions,
     ) -> Result<Self> {
-        let mut reader = reader_for_path(path, no_header)?;
+        let mut reader = reader_for_path(path, no_header, input_opts)?;
         let source = path.display().to_string();
 
         let (headers, pending, width) = if no_header {
             let mut records = reader.records();
-            match records.next() {
-                Some(rec) => {
-                    let record = rec.with_context(|| format!("failed reading from {}", source))?;
-                    let width = record.len();
-                    let headers = default_headers(width);
-                    (headers, Some(record), width)
+            let mut width = 0usize;
+            let mut pending_record: Option<csv::StringRecord> = None;
+            loop {
+                match records.next() {
+                    Some(rec) => {
+                        let record =
+                            rec.with_context(|| format!("failed reading from {}", source))?;
+                        if let Some(expected) = (width != 0).then_some(width) {
+                            if record.len() != expected {
+                                if input_opts.ignore_illegal {
+                                    continue;
+                                } else {
+                                    bail!("rows in {} have inconsistent column counts", source);
+                                }
+                            }
+                        }
+                        if should_skip_record(
+                            &record,
+                            input_opts,
+                            if width == 0 { None } else { Some(width) },
+                        ) {
+                            continue;
+                        }
+                        width = record.len();
+                        pending_record = Some(record);
+                        break;
+                    }
+                    None => break,
                 }
-                None => (Vec::new(), None, 0),
             }
+            let headers = default_headers(width);
+            (headers, pending_record, width)
         } else {
             let headers = reader
                 .headers()
@@ -134,6 +176,7 @@ impl StreamTable {
             pending,
             width,
             source,
+            input_opts: input_opts.clone(),
         };
 
         if table.pending.is_some() {
@@ -186,18 +229,35 @@ impl StreamTable {
         if let Some(record) = self.pending.take() {
             return Ok(Some(record));
         }
-        match self.reader.records().next() {
-            Some(rec) => {
-                let record = rec.with_context(|| format!("failed reading from {}", self.source))?;
-                if self.width == 0 {
-                    self.width = record.len();
-                    self.empty_row = vec![String::new(); self.width];
-                } else if record.len() != self.width {
-                    bail!("rows in {} have inconsistent column counts", self.source);
+        loop {
+            match self.reader.records().next() {
+                Some(rec) => {
+                    let record =
+                        rec.with_context(|| format!("failed reading from {}", self.source))?;
+                    if self.width == 0 {
+                        if record.len() != 0 {
+                            self.width = record.len();
+                            self.empty_row = vec![String::new(); self.width];
+                        }
+                    } else if record.len() != self.width {
+                        if self.input_opts.ignore_illegal {
+                            continue;
+                        } else {
+                            bail!("rows in {} have inconsistent column counts", self.source);
+                        }
+                    }
+                    let width_opt = (self.width != 0).then_some(self.width);
+                    if should_skip_record(&record, &self.input_opts, width_opt) {
+                        continue;
+                    }
+                    if self.width == 0 {
+                        self.width = record.len();
+                        self.empty_row = vec![String::new(); self.width];
+                    }
+                    return Ok(Some(record));
                 }
-                Ok(Some(record))
+                None => return Ok(None),
             }
-            None => Ok(None),
         }
     }
 }
@@ -206,6 +266,12 @@ pub fn run(args: JoinArgs) -> Result<()> {
     if args.files.len() < 2 {
         bail!("join requires at least two input files");
     }
+
+    let input_opts = InputOptions::from_flags(
+        &args.comment_char,
+        args.ignore_empty_row,
+        args.ignore_illegal_row,
+    )?;
 
     let column_specs = parse_multi_selector_spec(&args.fields, args.files.len())?;
     validate_join_width(&column_specs)?;
@@ -221,6 +287,7 @@ pub fn run(args: JoinArgs) -> Result<()> {
             &keep,
             args.no_header,
             !args.no_header,
+            &input_opts,
         );
     }
 
@@ -230,7 +297,7 @@ pub fn run(args: JoinArgs) -> Result<()> {
             .get(idx)
             .context("missing column specification for file")?;
         let select_for_file = select_specs[idx].as_ref().map(|v| v.as_slice());
-        let table = load_table(path, specs, select_for_file, args.no_header)?;
+        let table = load_table(path, specs, select_for_file, args.no_header, &input_opts)?;
         tables.push(table);
     }
 
@@ -242,17 +309,34 @@ fn load_table(
     selectors: &[ColumnSelector],
     selected_columns: Option<&[ColumnSelector]>,
     no_header: bool,
+    input_opts: &InputOptions,
 ) -> Result<Table> {
-    let mut reader = reader_for_path(path, no_header)?;
+    let mut reader = reader_for_path(path, no_header, input_opts)?;
 
     let (headers, rows) = if no_header {
         let mut collected = Vec::new();
+        let mut expected_width: Option<usize> = None;
         for record in reader.records() {
             let record =
                 record.with_context(|| format!("failed reading from {}", path.display()))?;
+            if let Some(width) = expected_width {
+                if record.len() != width {
+                    if input_opts.ignore_illegal {
+                        continue;
+                    } else {
+                        bail!("rows in {} have inconsistent column counts", path.display());
+                    }
+                }
+            }
+            if should_skip_record(&record, input_opts, expected_width) {
+                continue;
+            }
+            let width_entry = expected_width.get_or_insert(record.len());
             collected.push(record.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            // ensure expected width is initialized for ignoring logic
+            let _ = width_entry;
         }
-        let header_len = collected.first().map(|row| row.len()).unwrap_or(0);
+        let header_len = expected_width.unwrap_or(0);
         let headers = default_headers(header_len);
         (headers, collected)
     } else {
@@ -262,18 +346,25 @@ fn load_table(
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
+        let expected_width = headers.len();
         let mut collected = Vec::new();
         for record in reader.records() {
             let record =
                 record.with_context(|| format!("failed reading from {}", path.display()))?;
+            if record.len() != expected_width {
+                if input_opts.ignore_illegal {
+                    continue;
+                } else {
+                    bail!("rows in {} have inconsistent column counts", path.display());
+                }
+            }
+            if should_skip_record(&record, input_opts, Some(expected_width)) {
+                continue;
+            }
             collected.push(record.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         }
         (headers, collected)
     };
-
-    if rows.iter().any(|row| row.len() != headers.len()) {
-        bail!("rows in {} have inconsistent column counts", path.display());
-    }
 
     let join_indices = resolve_selectors(&headers, selectors, no_header)?;
     let join_set: HashSet<usize> = join_indices.iter().cloned().collect();
@@ -561,6 +652,7 @@ fn stream_join(
     keep: &KeepStrategy,
     no_header: bool,
     has_header: bool,
+    input_opts: &InputOptions,
 ) -> Result<()> {
     let mut tables = Vec::with_capacity(files.len());
     for (idx, path) in files.iter().enumerate() {
@@ -570,7 +662,7 @@ fn stream_join(
         let select_for_file = select_specs
             .get(idx)
             .and_then(|opt| opt.as_ref().map(|v| v.as_slice()));
-        let table = StreamTable::new(path, selectors, select_for_file, no_header)?;
+        let table = StreamTable::new(path, selectors, select_for_file, no_header, input_opts)?;
         tables.push(table);
     }
 

@@ -95,6 +95,7 @@ Aggregators support descriptive statistics in `summarize` and row-wise calculati
 - Every command accepts files or `-` (stdin) and auto-detects `.tsv`, `.tsv.gz`, and `.tsv.xz` inputs.
 - Add `-H/--no-header` when your data lacks a header row; selectors fall back to 1-based indices.
 - Commands are stream-friendly—pipe them freely to build larger workflows.
+- Use `-C/--comment-char`, `-E/--ignore-empty-row`, and `-I/--ignore-illegal-row` on any subcommand to control how input lines are filtered before processing.
 
 ---
 
@@ -138,7 +139,7 @@ Merge tables on shared keys. Provide selectors with `-f/--fields`; when all inpu
 tsvkit join -f subject_id examples/samples.tsv examples/subjects.tsv
 ```
 
-Control join type with `-k` (`-k 0` = full outer). Choose additional columns from each file with `-s/--select`; by default every non-key column from every file is emitted. The selector syntax matches `-f`: separate per-file specs with semicolons (`samples_cols;subjects_cols`), and within each spec use commas/ranges to list the columns you want to keep. Add `--sorted` to stream when inputs are pre-sorted on the key.
+Control join type with `-k` (`-k 0` = full outer). Pick which columns from each file to emit with `-F/--select`; by default every non-key column from every file is included. The selector syntax matches `-f`: separate per-file specs with semicolons (`samples_cols;subjects_cols`), and within each spec use commas/ranges to list the columns you want to keep. Add `--sorted` to stream when inputs are pre-sorted on the key.
 
 ### `mutate`
 

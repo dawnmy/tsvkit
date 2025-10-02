@@ -103,7 +103,44 @@ pub fn resolve_selectors(
     Ok(indices)
 }
 
-pub fn reader_for_path(path: &Path, no_header: bool) -> Result<csv::Reader<Box<dyn io::Read>>> {
+#[derive(Debug, Clone)]
+pub struct InputOptions {
+    pub comment: Option<u8>,
+    pub ignore_empty: bool,
+    pub ignore_illegal: bool,
+}
+
+impl InputOptions {
+    pub fn from_flags(
+        comment_char: &str,
+        ignore_empty: bool,
+        ignore_illegal: bool,
+    ) -> Result<Self> {
+        let comment = if comment_char.is_empty() {
+            None
+        } else {
+            let mut chars = comment_char.chars();
+            let first = chars
+                .next()
+                .with_context(|| "comment character must not be empty")?;
+            if chars.next().is_some() {
+                bail!("comment character must be a single UTF-8 scalar value");
+            }
+            Some(first as u8)
+        };
+        Ok(InputOptions {
+            comment,
+            ignore_empty,
+            ignore_illegal,
+        })
+    }
+}
+
+pub fn reader_for_path(
+    path: &Path,
+    no_header: bool,
+    options: &InputOptions,
+) -> Result<csv::Reader<Box<dyn io::Read>>> {
     let reader: Box<dyn io::Read> = if path == Path::new("-") {
         Box::new(io::stdin().lock())
     } else {
@@ -124,8 +161,31 @@ pub fn reader_for_path(path: &Path, no_header: bool) -> Result<csv::Reader<Box<d
     Ok(ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(!no_header)
+        .comment(options.comment)
         .flexible(true)
         .from_reader(reader))
+}
+
+pub fn record_is_empty(record: &csv::StringRecord) -> bool {
+    record.iter().all(|field| field.trim().is_empty())
+}
+
+pub fn should_skip_record(
+    record: &csv::StringRecord,
+    options: &InputOptions,
+    expected_width: Option<usize>,
+) -> bool {
+    if options.ignore_empty && record_is_empty(record) {
+        return true;
+    }
+    if options.ignore_illegal {
+        if let Some(width) = expected_width {
+            if record.len() != width {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn default_headers(len: usize) -> Vec<String> {

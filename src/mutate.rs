@@ -5,7 +5,10 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use regex::Regex;
 
-use crate::common::{default_headers, parse_selector_list, reader_for_path, resolve_selectors};
+use crate::common::{
+    InputOptions, default_headers, parse_selector_list, reader_for_path, resolve_selectors,
+    should_skip_record,
+};
 use crate::expression::{BoundValue, bind_value_expression, eval_value, parse_value_expression};
 
 #[derive(Args, Debug)]
@@ -31,19 +34,51 @@ pub struct MutateArgs {
     /// Treat input as headerless (columns referenced by 1-based indices only)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
+
+    /// Lines starting with this comment character are skipped (set to an uncommon symbol if your header begins with '#')
+    #[arg(
+        short = 'C',
+        long = "comment-char",
+        value_name = "CHAR",
+        default_value = "#"
+    )]
+    pub comment_char: String,
+
+    /// Ignore rows where every field is empty/whitespace
+    #[arg(short = 'E', long = "ignore-empty-row")]
+    pub ignore_empty_row: bool,
+
+    /// Ignore rows whose column count differs from the header/first row
+    #[arg(short = 'I', long = "ignore-illegal-row")]
+    pub ignore_illegal_row: bool,
 }
 
 pub fn run(args: MutateArgs) -> Result<()> {
-    let mut reader = reader_for_path(&args.file, args.no_header)?;
+    let input_opts = InputOptions::from_flags(
+        &args.comment_char,
+        args.ignore_empty_row,
+        args.ignore_illegal_row,
+    )?;
+    let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
     let mut writer = BufWriter::new(io::stdout().lock());
 
     if args.no_header {
         let mut records = reader.records();
-        let first_record = match records.next() {
-            Some(rec) => rec.with_context(|| format!("failed reading from {:?}", args.file))?,
-            None => return Ok(()),
+        let first_record = loop {
+            match records.next() {
+                Some(rec) => {
+                    let record =
+                        rec.with_context(|| format!("failed reading from {:?}", args.file))?;
+                    if should_skip_record(&record, &input_opts, None) {
+                        continue;
+                    }
+                    break record;
+                }
+                None => return Ok(()),
+            }
         };
-        let headers = default_headers(first_record.len());
+        let expected_width = first_record.len();
+        let headers = default_headers(expected_width);
         let ops = parse_operations(&args.exprs, &headers, true)?;
 
         let mut row = first_record
@@ -56,6 +91,9 @@ pub fn run(args: MutateArgs) -> Result<()> {
 
         for record in records {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            if should_skip_record(&record, &input_opts, Some(expected_width)) {
+                continue;
+            }
             let mut row = record.iter().map(|s| s.to_string()).collect::<Vec<_>>();
             process_row(&mut row, &ops)?;
             writer.write_all(row.join("\t").as_bytes())?;
@@ -69,6 +107,7 @@ pub fn run(args: MutateArgs) -> Result<()> {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
         let ops = parse_operations(&args.exprs, &headers, false)?;
+        let expected_width = headers.len();
 
         let mut output_headers = headers.clone();
         for op in &ops {
@@ -83,6 +122,9 @@ pub fn run(args: MutateArgs) -> Result<()> {
 
         for record in reader.records() {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            if should_skip_record(&record, &input_opts, Some(expected_width)) {
+                continue;
+            }
             let mut row = record.iter().map(|s| s.to_string()).collect::<Vec<_>>();
             process_row(&mut row, &ops)?;
             writer.write_all(row.join("\t").as_bytes())?;

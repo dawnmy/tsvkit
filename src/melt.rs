@@ -5,7 +5,10 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use indexmap::IndexSet;
 
-use crate::common::{default_headers, parse_selector_list, reader_for_path, resolve_selectors};
+use crate::common::{
+    InputOptions, default_headers, parse_selector_list, reader_for_path, resolve_selectors,
+    should_skip_record,
+};
 
 #[derive(Args, Debug)]
 #[command(
@@ -36,27 +39,57 @@ pub struct MeltArgs {
     /// Treat input as headerless (columns referenced by indices only)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
+
+    /// Lines starting with this comment character are skipped (set to an uncommon symbol if your header begins with '#')
+    #[arg(
+        short = 'C',
+        long = "comment-char",
+        value_name = "CHAR",
+        default_value = "#"
+    )]
+    pub comment_char: String,
+
+    /// Ignore rows where every field is empty/whitespace
+    #[arg(short = 'E', long = "ignore-empty-row")]
+    pub ignore_empty_row: bool,
+
+    /// Ignore rows whose column count differs from the header/first row
+    #[arg(short = 'I', long = "ignore-illegal-row")]
+    pub ignore_illegal_row: bool,
 }
 
 pub fn run(args: MeltArgs) -> Result<()> {
-    let mut reader = reader_for_path(&args.file, args.no_header)?;
+    let input_opts = InputOptions::from_flags(
+        &args.comment_char,
+        args.ignore_empty_row,
+        args.ignore_illegal_row,
+    )?;
+    let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
     let mut writer = BufWriter::new(io::stdout().lock());
 
     if args.no_header {
-        let mut records = reader.records();
-        let first = match records.next() {
-            Some(rec) => rec.with_context(|| format!("failed reading from {:?}", args.file))?,
-            None => {
-                writer.flush()?;
-                return Ok(());
-            }
-        };
         let mut rows = Vec::new();
-        rows.push(first.clone());
-        for record in records {
-            rows.push(record.with_context(|| format!("failed reading from {:?}", args.file))?);
+        let mut expected_width: Option<usize> = None;
+        for record in reader.records() {
+            let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            if let Some(width) = expected_width {
+                if record.len() != width {
+                    if input_opts.ignore_illegal {
+                        continue;
+                    } else {
+                        bail!("rows in {:?} have inconsistent column counts", args.file);
+                    }
+                }
+            }
+            if should_skip_record(&record, &input_opts, expected_width) {
+                continue;
+            }
+            if expected_width.is_none() {
+                expected_width = Some(record.len());
+            }
+            rows.push(record);
         }
-        let headers = default_headers(first.len());
+        let headers = default_headers(expected_width.unwrap_or(0));
         emit_melt(&headers, rows, &args, &mut writer)?;
         writer.flush()?;
         return Ok(());
@@ -71,7 +104,18 @@ pub fn run(args: MeltArgs) -> Result<()> {
 
     let mut rows = Vec::new();
     for record in reader.records() {
-        rows.push(record.with_context(|| format!("failed reading from {:?}", args.file))?);
+        let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+        if record.len() != headers.len() {
+            if input_opts.ignore_illegal {
+                continue;
+            } else {
+                bail!("rows in {:?} have inconsistent column counts", args.file);
+            }
+        }
+        if should_skip_record(&record, &input_opts, Some(headers.len())) {
+            continue;
+        }
+        rows.push(record);
     }
 
     emit_melt(&headers, rows, &args, &mut writer)?;

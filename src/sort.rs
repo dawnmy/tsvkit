@@ -7,7 +7,8 @@ use clap::Args;
 use csv::StringRecord;
 
 use crate::common::{
-    default_headers, parse_single_selector, reader_for_path, resolve_single_selector,
+    InputOptions, default_headers, parse_single_selector, reader_for_path, resolve_single_selector,
+    should_skip_record,
 };
 
 #[derive(Args, Debug)]
@@ -31,6 +32,23 @@ pub struct SortArgs {
     /// Use an unstable sort (faster but does not preserve order of equal keys)
     #[arg(long = "unstable")]
     pub unstable: bool,
+
+    /// Lines starting with this comment character are skipped (set to an uncommon symbol if your header begins with '#')
+    #[arg(
+        short = 'C',
+        long = "comment-char",
+        value_name = "CHAR",
+        default_value = "#"
+    )]
+    pub comment_char: String,
+
+    /// Ignore rows where every field is empty/whitespace
+    #[arg(short = 'E', long = "ignore-empty-row")]
+    pub ignore_empty_row: bool,
+
+    /// Ignore rows whose column count differs from the header/first row
+    #[arg(short = 'I', long = "ignore-illegal-row")]
+    pub ignore_illegal_row: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,15 +84,37 @@ pub fn run(args: SortArgs) -> Result<()> {
         .map(|spec| parse_key_spec(spec))
         .collect::<Result<Vec<_>>>()?;
 
-    let mut reader = reader_for_path(&args.file, args.no_header)?;
+    let input_opts = InputOptions::from_flags(
+        &args.comment_char,
+        args.ignore_empty_row,
+        args.ignore_illegal_row,
+    )?;
+    let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
     let mut writer = BufWriter::new(io::stdout().lock());
 
     let mut records: Vec<StringRecord> = Vec::new();
     let headers = if args.no_header {
+        let mut reference_width: Option<usize> = None;
         for record in reader.records() {
-            records.push(record.with_context(|| format!("failed reading from {:?}", args.file))?);
+            let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            if let Some(width) = reference_width {
+                if record.len() != width {
+                    if input_opts.ignore_illegal {
+                        continue;
+                    } else {
+                        bail!("rows in {:?} have inconsistent column counts", args.file);
+                    }
+                }
+            }
+            if should_skip_record(&record, &input_opts, reference_width) {
+                continue;
+            }
+            if reference_width.is_none() {
+                reference_width = Some(record.len());
+            }
+            records.push(record);
         }
-        let len = records.first().map(|r| r.len()).unwrap_or(0);
+        let len = reference_width.unwrap_or(0);
         default_headers(len)
     } else {
         let header_row = reader
@@ -84,7 +124,18 @@ pub fn run(args: SortArgs) -> Result<()> {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
         for record in reader.records() {
-            records.push(record.with_context(|| format!("failed reading from {:?}", args.file))?);
+            let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            if record.len() != header_row.len() {
+                if input_opts.ignore_illegal {
+                    continue;
+                } else {
+                    bail!("rows in {:?} have inconsistent column counts", args.file);
+                }
+            }
+            if should_skip_record(&record, &input_opts, Some(header_row.len())) {
+                continue;
+            }
+            records.push(record);
         }
         if !header_row.is_empty() {
             writeln!(writer, "{}", header_row.join("\t"))?;

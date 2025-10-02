@@ -7,8 +7,8 @@ use clap::Args;
 use indexmap::IndexMap;
 
 use crate::common::{
-    default_headers, parse_selector_list, parse_single_selector, reader_for_path,
-    resolve_selectors, resolve_single_selector,
+    InputOptions, default_headers, parse_selector_list, parse_single_selector, reader_for_path,
+    resolve_selectors, resolve_single_selector, should_skip_record,
 };
 
 #[derive(Args, Debug)]
@@ -32,6 +32,23 @@ pub struct SummarizeArgs {
     /// Treat the input as headerless (columns referenced by 1-based indices)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
+
+    /// Lines starting with this comment character are skipped (set to an uncommon symbol if your header begins with '#')
+    #[arg(
+        short = 'C',
+        long = "comment-char",
+        value_name = "CHAR",
+        default_value = "#"
+    )]
+    pub comment_char: String,
+
+    /// Ignore rows where every field is empty/whitespace
+    #[arg(short = 'E', long = "ignore-empty-row")]
+    pub ignore_empty_row: bool,
+
+    /// Ignore rows whose column count differs from the header/first row
+    #[arg(short = 'I', long = "ignore-illegal-row")]
+    pub ignore_illegal_row: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -387,7 +404,12 @@ impl GroupState {
 }
 
 pub fn run(args: SummarizeArgs) -> Result<()> {
-    let mut reader = reader_for_path(&args.file, args.no_header)?;
+    let input_opts = InputOptions::from_flags(
+        &args.comment_char,
+        args.ignore_empty_row,
+        args.ignore_illegal_row,
+    )?;
+    let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
     let mut groups: IndexMap<Vec<String>, GroupState> = IndexMap::new();
 
     let headers: Vec<String>;
@@ -396,10 +418,19 @@ pub fn run(args: SummarizeArgs) -> Result<()> {
 
     if args.no_header {
         let mut records = reader.records();
-        let first_record = match records.next() {
-            Some(rec) => rec.with_context(|| format!("failed reading from {:?}", args.file))?,
-            None => {
-                bail!("input is empty; cannot infer columns without a header");
+        let first_record = loop {
+            match records.next() {
+                Some(rec) => {
+                    let record =
+                        rec.with_context(|| format!("failed reading from {:?}", args.file))?;
+                    if should_skip_record(&record, &input_opts, None) {
+                        continue;
+                    }
+                    break record;
+                }
+                None => {
+                    bail!("input is empty; cannot infer columns without a header");
+                }
             }
         };
         headers = default_headers(first_record.len());
@@ -409,6 +440,9 @@ pub fn run(args: SummarizeArgs) -> Result<()> {
         process_record(&mut groups, &group_indices, &stat_requests, &first_record);
         for record in records {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            if should_skip_record(&record, &input_opts, Some(first_record.len())) {
+                continue;
+            }
             process_record(&mut groups, &group_indices, &stat_requests, &record);
         }
     } else {
@@ -423,6 +457,9 @@ pub fn run(args: SummarizeArgs) -> Result<()> {
 
         for record in reader.records() {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            if should_skip_record(&record, &input_opts, Some(headers.len())) {
+                continue;
+            }
             process_record(&mut groups, &group_indices, &stat_requests, &record);
         }
     }

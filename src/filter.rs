@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 
-use crate::common::{default_headers, reader_for_path};
+use crate::common::{InputOptions, default_headers, reader_for_path, should_skip_record};
 use crate::expression::{bind_expression, evaluate, parse_expression};
 
 #[derive(Args, Debug)]
@@ -29,18 +29,49 @@ pub struct FilterArgs {
     /// Treat input as headerless (columns become 1-based indices only)
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
+
+    /// Lines starting with this comment character are skipped (set to an uncommon symbol if your header begins with '#')
+    #[arg(
+        short = 'C',
+        long = "comment-char",
+        value_name = "CHAR",
+        default_value = "#"
+    )]
+    pub comment_char: String,
+
+    /// Ignore rows where every field is empty/whitespace
+    #[arg(short = 'E', long = "ignore-empty-row")]
+    pub ignore_empty_row: bool,
+
+    /// Ignore rows whose column count differs from the header/first row
+    #[arg(short = 'I', long = "ignore-illegal-row")]
+    pub ignore_illegal_row: bool,
 }
 
 pub fn run(args: FilterArgs) -> Result<()> {
     let expr_ast = parse_expression(&args.expr)?;
-    let mut reader = reader_for_path(&args.file, args.no_header)?;
+    let input_opts = InputOptions::from_flags(
+        &args.comment_char,
+        args.ignore_empty_row,
+        args.ignore_illegal_row,
+    )?;
+    let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
     let mut writer = BufWriter::new(io::stdout().lock());
 
     if args.no_header {
         let mut records = reader.records();
-        let first_record = match records.next() {
-            Some(rec) => rec.with_context(|| format!("failed reading from {:?}", args.file))?,
-            None => return Ok(()),
+        let first_record = loop {
+            match records.next() {
+                Some(rec) => {
+                    let record =
+                        rec.with_context(|| format!("failed reading from {:?}", args.file))?;
+                    if should_skip_record(&record, &input_opts, None) {
+                        continue;
+                    }
+                    break record;
+                }
+                None => return Ok(()),
+            }
         };
         let headers = default_headers(first_record.len());
         let bound = bind_expression(expr_ast, &headers, true)?;
@@ -48,8 +79,12 @@ pub fn run(args: FilterArgs) -> Result<()> {
         if evaluate(&bound, &first_record) {
             emit_record(&first_record, &mut writer)?;
         }
+        let expected_width = first_record.len();
         for record in records {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            if should_skip_record(&record, &input_opts, Some(expected_width)) {
+                continue;
+            }
             if evaluate(&bound, &record) {
                 emit_record(&record, &mut writer)?;
             }
@@ -62,12 +97,16 @@ pub fn run(args: FilterArgs) -> Result<()> {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
         let bound = bind_expression(expr_ast, &headers, false)?;
+        let expected_width = headers.len();
 
         if !headers.is_empty() {
             writeln!(writer, "{}", headers.join("\t"))?;
         }
         for record in reader.records() {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            if should_skip_record(&record, &input_opts, Some(expected_width)) {
+                continue;
+            }
             if evaluate(&bound, &record) {
                 emit_record(&record, &mut writer)?;
             }
