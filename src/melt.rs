@@ -56,6 +56,10 @@ pub struct MeltArgs {
     /// Ignore rows whose column count differs from the header/first row
     #[arg(short = 'I', long = "ignore-illegal-row")]
     pub ignore_illegal_row: bool,
+
+    /// Fill value to use when a source cell is empty or missing
+    #[arg(long = "fill", value_name = "TEXT")]
+    pub fill: Option<String>,
 }
 
 pub fn run(args: MeltArgs) -> Result<()> {
@@ -66,6 +70,7 @@ pub fn run(args: MeltArgs) -> Result<()> {
     )?;
     let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
     let mut writer = BufWriter::new(io::stdout().lock());
+    let fill_value = args.fill.clone().unwrap_or_else(String::new);
 
     if args.no_header {
         let mut rows = Vec::new();
@@ -90,7 +95,7 @@ pub fn run(args: MeltArgs) -> Result<()> {
             rows.push(record);
         }
         let headers = default_headers(expected_width.unwrap_or(0));
-        emit_melt(&headers, rows, &args, &mut writer)?;
+        emit_melt(&headers, rows, &args, &fill_value, &mut writer)?;
         writer.flush()?;
         return Ok(());
     }
@@ -118,7 +123,7 @@ pub fn run(args: MeltArgs) -> Result<()> {
         rows.push(record);
     }
 
-    emit_melt(&headers, rows, &args, &mut writer)?;
+    emit_melt(&headers, rows, &args, &fill_value, &mut writer)?;
     writer.flush()?;
     Ok(())
 }
@@ -127,6 +132,7 @@ fn emit_melt(
     headers: &[String],
     rows: Vec<csv::StringRecord>,
     args: &MeltArgs,
+    fill_value: &str,
     writer: &mut BufWriter<io::StdoutLock<'_>>,
 ) -> Result<()> {
     if rows.is_empty() {
@@ -200,13 +206,23 @@ fn emit_melt(
     for record in rows {
         let mut id_values = Vec::with_capacity(id_indices.len());
         for &idx in &id_indices {
-            id_values.push(record.get(idx).unwrap_or("").to_string());
+            let raw = record.get(idx).unwrap_or("");
+            id_values.push(if raw.is_empty() {
+                fill_value.to_string()
+            } else {
+                raw.to_string()
+            });
         }
         for &value_idx in &value_indices {
             let mut row = id_values.clone();
             let variable = default_headers.get(value_idx).cloned().unwrap_or_default();
             row.push(variable);
-            row.push(record.get(value_idx).unwrap_or("").to_string());
+            let raw = record.get(value_idx).unwrap_or("");
+            row.push(if raw.is_empty() {
+                fill_value.to_string()
+            } else {
+                raw.to_string()
+            });
             writeln!(writer, "{}", row.join("\t"))?;
         }
     }

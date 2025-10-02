@@ -57,6 +57,23 @@ _Output_
 
 The same pipeline works if the cytokine table is compressed (`examples/cytokines.tsv.gz`).
 
+## Command Overview
+
+The table below lists every `tsvkit` subcommand and a one-line purpose summary; each item links to the detailed section later in this guide.
+
+- [`cut`](#cut) — select or reorder columns via names, indices, or ranges.
+- [`filter`](#filter) — keep rows matching an expression (math, logic, regex, functions).
+- [`join`](#join) — join multiple TSVs on key columns with parallel loading and fill values.
+- [`mutate`](#mutate) — create or overwrite columns using expressions, aggregates, and string helpers.
+- [`summarize`](#summarize) — group rows and compute aggregates (mean, median, quantiles, etc.).
+- [`sort`](#sort) — sort rows by one or more keys with numeric/text modifiers.
+- [`melt`](#melt) — convert wide tables into tidy long form with `variable/value` pairs.
+- [`pivot`](#pivot) — convert long form back to wide with optional fill value for missing cells.
+- [`slice`](#slice) — extract rows by 1-based indices or ranges.
+- [`pretty`](#pretty) — render aligned, boxed tables for quick inspection or sharing.
+
+The following sections cover shared concepts first, then dive into each command with practical examples.
+
 ## Core Concepts
 
 These conventions appear across the toolkit; understanding them once makes each subcommand predictable.
@@ -97,6 +114,7 @@ Aggregators support descriptive statistics in `summarize` and row-wise calculati
 - Commands are stream-friendly—pipe them freely to build larger workflows.
 - Use `-C/--comment-char`, `-E/--ignore-empty-row`, and `-I/--ignore-illegal-row` on any subcommand to control how input lines are filtered before processing.
 - `tsvkit join` parallelizes input loading; control the worker count with `-t/--threads` (defaults to the lesser of 8 and the available CPU cores).
+- `--fill TEXT` lets join, melt, pivot (and others) swap empty cells for a custom placeholder.
 
 ---
 
@@ -140,11 +158,7 @@ Merge tables on shared keys. Provide selectors with `-f/--fields`; when all inpu
 tsvkit join -f subject_id examples/samples.tsv examples/subjects.tsv
 ```
 
-Control join type with `-k` (`-k 0` = full outer). Pick which columns from each file to emit with `-F/--select`; by default every non-key column from every file is included. The selector syntax matches `-f`: separate per-file specs with semicolons (`samples_cols;subjects_cols`), and within each spec use commas/ranges to list the columns you want to keep. Add `--sorted` to stream when inputs are pre-sorted on the key.
-
-`tsvkit join` also prunes unneeded input columns before building its data structures, so selecting a narrower set of outputs can significantly reduce memory and runtime.
-
-By default join will use up to 8 threads to load inputs; override with `-t/--threads N` when you want a different level of parallelism.
+Control join type with `-k` (`-k 0` = full outer). Use `-F/--select` to specify output columns (defaults to all non-key columns); syntax mirrors `-f`. `--fill TEXT` supplies placeholders for missing combinations, while `--sorted` streams pre-sorted data. `tsvkit join` trims unused columns before indexing, and `-t/--threads` (default up to 8) balances throughput and resource usage.
 
 ### `mutate`
 
@@ -186,7 +200,7 @@ tsvkit sort -k purity:nr -k contamination_pct examples/samples.tsv
 
 ### `melt`
 
-Convert wide tables into tidy long form.
+Convert wide tables into tidy long form. Add `--fill TEXT` to substitute blanks with a chosen value.
 
 ```bash
 tsvkit melt -i sample_id -v IL6:IL10 examples/cytokines.tsv
@@ -194,7 +208,7 @@ tsvkit melt -i sample_id -v IL6:IL10 examples/cytokines.tsv
 
 ### `pivot`
 
-Promote long-form values to columns. `-c/--column` also accepts the short alias `-f` for consistency with other commands.
+Promote long-form values to columns. `-c/--column` also accepts the short alias `-f`, and `--fill TEXT` sets a default value for missing combinations.
 
 ```bash
 tsvkit pivot -i gene -c sample_id -v expression examples/expression.tsv

@@ -62,6 +62,10 @@ pub struct JoinArgs {
     /// Ignore rows whose column count differs from the header/first row
     #[arg(short = 'I', long = "ignore-illegal-row")]
     pub ignore_illegal_row: bool,
+
+    /// Fill value to use when a joined file lacks data for a given key (defaults to empty string)
+    #[arg(long = "fill", value_name = "TEXT")]
+    pub fill: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +112,7 @@ impl StreamTable {
         selected_columns: Option<&[ColumnSelector]>,
         no_header: bool,
         input_opts: &InputOptions,
+        fill_value: &str,
     ) -> Result<Self> {
         let mut reader = reader_for_path(path, no_header, input_opts)?;
         let source = path.display().to_string();
@@ -155,7 +160,7 @@ impl StreamTable {
                 headers: projection_plan.projected_headers,
                 join_indices: projection_plan.join_indices,
                 include_indices: projection_plan.include_indices,
-                empty_row: vec![String::new(); projection_plan.projection.len()],
+                empty_row: vec![fill_value.to_string(); projection_plan.projection.len()],
                 current: None,
                 pending: pending_row,
                 source_width,
@@ -182,7 +187,7 @@ impl StreamTable {
             headers: projection_plan.projected_headers,
             join_indices: projection_plan.join_indices,
             include_indices: projection_plan.include_indices,
-            empty_row: vec![String::new(); projection_plan.projection.len()],
+            empty_row: vec![fill_value.to_string(); projection_plan.projection.len()],
             current: None,
             pending: None,
             source_width,
@@ -266,14 +271,16 @@ pub fn run(args: JoinArgs) -> Result<()> {
         None => default_thread_count(),
     };
 
+    let fill_value = args.fill.clone().unwrap_or_else(String::new);
+
     ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
         .with_context(|| "failed to initialize thread pool")?
-        .install(|| execute_join(&args, &input_opts))
+        .install(|| execute_join(&args, &input_opts, &fill_value))
 }
 
-fn execute_join(args: &JoinArgs, input_opts: &InputOptions) -> Result<()> {
+fn execute_join(args: &JoinArgs, input_opts: &InputOptions, fill_value: &str) -> Result<()> {
     if args.sorted {
         let column_specs = parse_multi_selector_spec(&args.fields, args.files.len())?;
         validate_join_width(&column_specs)?;
@@ -287,6 +294,7 @@ fn execute_join(args: &JoinArgs, input_opts: &InputOptions) -> Result<()> {
             args.no_header,
             !args.no_header,
             input_opts,
+            fill_value,
         );
     }
 
@@ -311,6 +319,7 @@ fn execute_join(args: &JoinArgs, input_opts: &InputOptions) -> Result<()> {
                 select_for_file,
                 args.no_header,
                 input_opts,
+                fill_value,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -324,6 +333,7 @@ fn load_table(
     selected_columns: Option<&[ColumnSelector]>,
     no_header: bool,
     input_opts: &InputOptions,
+    fill_value: &str,
 ) -> Result<Table> {
     let mut reader = reader_for_path(path, no_header, input_opts)?;
 
@@ -420,7 +430,7 @@ fn load_table(
         )
     };
 
-    let empty_row = vec![String::new(); headers.len()];
+    let empty_row = vec![fill_value.to_string(); headers.len()];
     let mut key_to_rows: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
     let mut key_order: Vec<Vec<String>> = Vec::new();
 
@@ -775,6 +785,7 @@ fn stream_join(
     no_header: bool,
     has_header: bool,
     input_opts: &InputOptions,
+    fill_value: &str,
 ) -> Result<()> {
     let mut tables = Vec::with_capacity(files.len());
     for (idx, path) in files.iter().enumerate() {
@@ -784,7 +795,14 @@ fn stream_join(
         let select_for_file = select_specs
             .get(idx)
             .and_then(|opt| opt.as_ref().map(|v| v.as_slice()));
-        let table = StreamTable::new(path, selectors, select_for_file, no_header, input_opts)?;
+        let table = StreamTable::new(
+            path,
+            selectors,
+            select_for_file,
+            no_header,
+            input_opts,
+            fill_value,
+        )?;
         tables.push(table);
     }
 
