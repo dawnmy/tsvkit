@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use rayon::prelude::*;
 
 use crate::common::{
     ColumnSelector, InputOptions, default_headers, parse_multi_selector_spec, parse_selector_list,
@@ -82,9 +83,10 @@ struct StreamTable {
     include_indices: Vec<usize>,
     empty_row: Vec<String>,
     current: Option<RowGroup>,
-    pending: Option<csv::StringRecord>,
-    width: usize,
+    pending: Option<Vec<String>>,
+    source_width: usize,
     source: String,
+    projection: Vec<usize>,
     input_opts: InputOptions,
 }
 
@@ -105,115 +107,105 @@ impl StreamTable {
         let mut reader = reader_for_path(path, no_header, input_opts)?;
         let source = path.display().to_string();
 
-        let (headers, pending, width) = if no_header {
+        if no_header {
             let mut records = reader.records();
-            let mut width = 0usize;
-            let mut pending_record: Option<csv::StringRecord> = None;
-            loop {
-                match records.next() {
-                    Some(rec) => {
-                        let record =
-                            rec.with_context(|| format!("failed reading from {}", source))?;
-                        if let Some(expected) = (width != 0).then_some(width) {
-                            if record.len() != expected {
-                                if input_opts.ignore_illegal {
-                                    continue;
-                                } else {
-                                    bail!("rows in {} have inconsistent column counts", source);
-                                }
-                            }
-                        }
-                        if should_skip_record(
-                            &record,
-                            input_opts,
-                            if width == 0 { None } else { Some(width) },
-                        ) {
-                            continue;
-                        }
-                        width = record.len();
-                        pending_record = Some(record);
-                        break;
+            let mut first_record: Option<csv::StringRecord> = None;
+            let mut source_width = 0usize;
+            while let Some(rec) = records.next() {
+                let record = rec.with_context(|| format!("failed reading from {}", source))?;
+                if should_skip_record(
+                    &record,
+                    input_opts,
+                    if source_width == 0 {
+                        None
+                    } else {
+                        Some(source_width)
+                    },
+                ) {
+                    continue;
+                }
+                if source_width != 0 && record.len() != source_width {
+                    if input_opts.ignore_illegal {
+                        continue;
+                    } else {
+                        bail!("rows in {} have inconsistent column counts", source);
                     }
-                    None => break,
                 }
+                source_width = record.len();
+                first_record = Some(record);
+                break;
             }
-            let headers = default_headers(width);
-            (headers, pending_record, width)
-        } else {
-            let headers = reader
-                .headers()
-                .with_context(|| format!("failed reading header from {}", source))?
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>();
-            let width = headers.len();
-            (headers, None, width)
-        };
 
-        let join_indices = resolve_selectors(&headers, selectors, no_header)?;
-        let join_set: HashSet<usize> = join_indices.iter().cloned().collect();
-        let include_indices = if let Some(cols) = selected_columns {
-            resolve_selectors(&headers, cols, no_header)?
-                .into_iter()
-                .filter(|idx| !join_set.contains(idx))
-                .collect()
-        } else {
-            headers
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, _)| (!join_set.contains(&idx)).then_some(idx))
-                .collect::<Vec<_>>()
-        };
-        let empty_row = vec![String::new(); width];
-
-        let mut table = StreamTable {
-            reader,
-            headers,
-            join_indices,
-            include_indices,
-            empty_row,
-            current: None,
-            pending,
-            width,
-            source,
-            input_opts: input_opts.clone(),
-        };
-
-        if table.pending.is_some() {
-            // ensure first pending record has the expected width
-            if let Some(ref pending) = table.pending {
-                if table.width == 0 {
-                    table.width = pending.len();
-                    table.empty_row = vec![String::new(); table.width];
-                } else if pending.len() != table.width {
-                    bail!("rows in {} have inconsistent column counts", table.source);
-                }
-            }
+            let headers_orig = default_headers(source_width);
+            let join_indices_orig = resolve_selectors(&headers_orig, selectors, true)?;
+            let include_indices_orig =
+                resolve_include_indices(&headers_orig, selected_columns, &join_indices_orig, true)?;
+            let projection_plan =
+                build_projection(&headers_orig, &join_indices_orig, &include_indices_orig);
+            let pending_row = first_record
+                .as_ref()
+                .map(|record| project_record(record, &projection_plan.projection));
+            return Ok(StreamTable {
+                reader,
+                headers: projection_plan.projected_headers,
+                join_indices: projection_plan.join_indices,
+                include_indices: projection_plan.include_indices,
+                empty_row: vec![String::new(); projection_plan.projection.len()],
+                current: None,
+                pending: pending_row,
+                source_width,
+                source,
+                projection: projection_plan.projection,
+                input_opts: input_opts.clone(),
+            });
         }
 
-        Ok(table)
+        let headers_orig = reader
+            .headers()
+            .with_context(|| format!("failed reading header from {}", source))?
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let source_width = headers_orig.len();
+        let join_indices_orig = resolve_selectors(&headers_orig, selectors, false)?;
+        let include_indices_orig =
+            resolve_include_indices(&headers_orig, selected_columns, &join_indices_orig, false)?;
+        let projection_plan =
+            build_projection(&headers_orig, &join_indices_orig, &include_indices_orig);
+        Ok(StreamTable {
+            reader,
+            headers: projection_plan.projected_headers,
+            join_indices: projection_plan.join_indices,
+            include_indices: projection_plan.include_indices,
+            empty_row: vec![String::new(); projection_plan.projection.len()],
+            current: None,
+            pending: None,
+            source_width,
+            source,
+            projection: projection_plan.projection,
+            input_opts: input_opts.clone(),
+        })
     }
 
     fn advance(&mut self) -> Result<()> {
-        let first_record = match self.next_record()? {
-            Some(record) => record,
+        let first_row = match self.next_record()? {
+            Some(row) => row,
             None => {
                 self.current = None;
                 return Ok(());
             }
         };
 
-        let key = make_key_from_record(&first_record, &self.join_indices);
-        let mut rows = vec![record_to_vec(&first_record)];
+        let key = make_key(&first_row, &self.join_indices);
+        let mut rows = vec![first_row];
 
         loop {
             match self.next_record()? {
-                Some(record) => {
-                    let record_key = make_key_from_record(&record, &self.join_indices);
-                    if record_key == key {
-                        rows.push(record_to_vec(&record));
+                Some(row) => {
+                    if make_key(&row, &self.join_indices) == key {
+                        rows.push(row);
                     } else {
-                        self.pending = Some(record);
+                        self.pending = Some(row);
                         break;
                     }
                 }
@@ -225,7 +217,7 @@ impl StreamTable {
         Ok(())
     }
 
-    fn next_record(&mut self) -> Result<Option<csv::StringRecord>> {
+    fn next_record(&mut self) -> Result<Option<Vec<String>>> {
         if let Some(record) = self.pending.take() {
             return Ok(Some(record));
         }
@@ -234,27 +226,17 @@ impl StreamTable {
                 Some(rec) => {
                     let record =
                         rec.with_context(|| format!("failed reading from {}", self.source))?;
-                    if self.width == 0 {
-                        if record.len() != 0 {
-                            self.width = record.len();
-                            self.empty_row = vec![String::new(); self.width];
-                        }
-                    } else if record.len() != self.width {
+                    if record.len() != self.source_width {
                         if self.input_opts.ignore_illegal {
                             continue;
                         } else {
                             bail!("rows in {} have inconsistent column counts", self.source);
                         }
                     }
-                    let width_opt = (self.width != 0).then_some(self.width);
-                    if should_skip_record(&record, &self.input_opts, width_opt) {
+                    if should_skip_record(&record, &self.input_opts, Some(self.source_width)) {
                         continue;
                     }
-                    if self.width == 0 {
-                        self.width = record.len();
-                        self.empty_row = vec![String::new(); self.width];
-                    }
-                    return Ok(Some(record));
+                    return Ok(Some(project_record(&record, &self.projection)));
                 }
                 None => return Ok(None),
             }
@@ -291,15 +273,24 @@ pub fn run(args: JoinArgs) -> Result<()> {
         );
     }
 
-    let mut tables = Vec::with_capacity(args.files.len());
-    for (idx, path) in args.files.iter().enumerate() {
-        let specs = column_specs
-            .get(idx)
-            .context("missing column specification for file")?;
-        let select_for_file = select_specs[idx].as_ref().map(|v| v.as_slice());
-        let table = load_table(path, specs, select_for_file, args.no_header, &input_opts)?;
-        tables.push(table);
-    }
+    let tables: Vec<Table> = args
+        .files
+        .par_iter()
+        .enumerate()
+        .map(|(idx, path)| -> Result<Table> {
+            let specs = column_specs
+                .get(idx)
+                .context("missing column specification for file")?;
+            let select_for_file = select_specs[idx].as_ref().map(|v| v.as_slice());
+            load_table(
+                path.as_path(),
+                specs,
+                select_for_file,
+                args.no_header,
+                &input_opts,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     output_joined(tables, &keep, !args.no_header)
 }
@@ -313,12 +304,15 @@ fn load_table(
 ) -> Result<Table> {
     let mut reader = reader_for_path(path, no_header, input_opts)?;
 
-    let (headers, rows) = if no_header {
-        let mut collected = Vec::new();
+    let (headers, rows, join_indices, include_indices) = if no_header {
+        let mut records = reader.records();
+        let mut first_record: Option<csv::StringRecord> = None;
         let mut expected_width: Option<usize> = None;
-        for record in reader.records() {
-            let record =
-                record.with_context(|| format!("failed reading from {}", path.display()))?;
+        while let Some(rec) = records.next() {
+            let record = rec.with_context(|| format!("failed reading from {}", path.display()))?;
+            if should_skip_record(&record, input_opts, expected_width) {
+                continue;
+            }
             if let Some(width) = expected_width {
                 if record.len() != width {
                     if input_opts.ignore_illegal {
@@ -328,29 +322,26 @@ fn load_table(
                     }
                 }
             }
-            if should_skip_record(&record, input_opts, expected_width) {
-                continue;
-            }
-            let width_entry = expected_width.get_or_insert(record.len());
-            collected.push(record.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-            // ensure expected width is initialized for ignoring logic
-            let _ = width_entry;
+            expected_width = Some(record.len());
+            first_record = Some(record);
+            break;
         }
-        let header_len = expected_width.unwrap_or(0);
-        let headers = default_headers(header_len);
-        (headers, collected)
-    } else {
-        let headers = reader
-            .headers()
-            .with_context(|| format!("failed reading header from {}", path.display()))?
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-        let expected_width = headers.len();
-        let mut collected = Vec::new();
-        for record in reader.records() {
-            let record =
-                record.with_context(|| format!("failed reading from {}", path.display()))?;
+
+        let expected_width = expected_width.unwrap_or(0);
+        let mut headers = default_headers(expected_width);
+        let join_indices_orig = resolve_selectors(&headers, selectors, true)?;
+        let include_indices_orig =
+            resolve_include_indices(&headers, selected_columns, &join_indices_orig, true)?;
+        let projection_plan = build_projection(&headers, &join_indices_orig, &include_indices_orig);
+        headers = projection_plan.projected_headers.clone();
+        let mut rows = Vec::new();
+
+        if let Some(record) = first_record {
+            rows.push(project_record(&record, &projection_plan.projection));
+        }
+
+        for rec in records {
+            let record = rec.with_context(|| format!("failed reading from {}", path.display()))?;
             if record.len() != expected_width {
                 if input_opts.ignore_illegal {
                     continue;
@@ -361,25 +352,49 @@ fn load_table(
             if should_skip_record(&record, input_opts, Some(expected_width)) {
                 continue;
             }
-            collected.push(record.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            rows.push(project_record(&record, &projection_plan.projection));
         }
-        (headers, collected)
-    };
 
-    let join_indices = resolve_selectors(&headers, selectors, no_header)?;
-    let join_set: HashSet<usize> = join_indices.iter().cloned().collect();
-
-    let include_indices = if let Some(cols) = selected_columns {
-        resolve_selectors(&headers, cols, no_header)?
-            .into_iter()
-            .filter(|idx| !join_set.contains(idx))
-            .collect()
+        (
+            headers,
+            rows,
+            projection_plan.join_indices,
+            projection_plan.include_indices,
+        )
     } else {
-        headers
+        let headers_orig = reader
+            .headers()
+            .with_context(|| format!("failed reading header from {}", path.display()))?
             .iter()
-            .enumerate()
-            .filter_map(|(idx, _)| (!join_set.contains(&idx)).then_some(idx))
-            .collect::<Vec<_>>()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let expected_width = headers_orig.len();
+        let join_indices_orig = resolve_selectors(&headers_orig, selectors, false)?;
+        let include_indices_orig =
+            resolve_include_indices(&headers_orig, selected_columns, &join_indices_orig, false)?;
+        let projection_plan =
+            build_projection(&headers_orig, &join_indices_orig, &include_indices_orig);
+        let mut rows = Vec::new();
+        for rec in reader.records() {
+            let record = rec.with_context(|| format!("failed reading from {}", path.display()))?;
+            if record.len() != expected_width {
+                if input_opts.ignore_illegal {
+                    continue;
+                } else {
+                    bail!("rows in {} have inconsistent column counts", path.display());
+                }
+            }
+            if should_skip_record(&record, input_opts, Some(expected_width)) {
+                continue;
+            }
+            rows.push(project_record(&record, &projection_plan.projection));
+        }
+        (
+            projection_plan.projected_headers,
+            rows,
+            projection_plan.join_indices,
+            projection_plan.include_indices,
+        )
     };
 
     let empty_row = vec![String::new(); headers.len()];
@@ -468,6 +483,85 @@ fn parse_select_specs(
         }
     }
     Ok(result)
+}
+
+fn resolve_include_indices(
+    headers: &[String],
+    selected_columns: Option<&[ColumnSelector]>,
+    join_indices: &[usize],
+    no_header: bool,
+) -> Result<Vec<usize>> {
+    let join_set: HashSet<usize> = join_indices.iter().cloned().collect();
+    let mut include_indices = if let Some(cols) = selected_columns {
+        resolve_selectors(headers, cols, no_header)?
+    } else {
+        headers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, _)| (!join_set.contains(&idx)).then_some(idx))
+            .collect::<Vec<_>>()
+    };
+    include_indices.retain(|idx| !join_set.contains(idx));
+    Ok(include_indices)
+}
+
+#[derive(Debug)]
+struct ProjectionPlan {
+    projection: Vec<usize>,
+    projected_headers: Vec<String>,
+    join_indices: Vec<usize>,
+    include_indices: Vec<usize>,
+}
+
+fn build_projection(
+    headers: &[String],
+    join_indices: &[usize],
+    include_indices: &[usize],
+) -> ProjectionPlan {
+    let mut projection = Vec::new();
+    let mut projected_headers = Vec::new();
+    let mut index_map: HashMap<usize, usize> = HashMap::new();
+
+    for &idx in join_indices {
+        if let Entry::Vacant(v) = index_map.entry(idx) {
+            let pos = projection.len();
+            projection.push(idx);
+            projected_headers.push(headers.get(idx).cloned().unwrap_or_default());
+            v.insert(pos);
+        }
+    }
+
+    for &idx in include_indices {
+        if let Entry::Vacant(v) = index_map.entry(idx) {
+            let pos = projection.len();
+            projection.push(idx);
+            projected_headers.push(headers.get(idx).cloned().unwrap_or_default());
+            v.insert(pos);
+        }
+    }
+
+    let join_positions = join_indices
+        .iter()
+        .map(|idx| index_map[idx])
+        .collect::<Vec<_>>();
+    let include_positions = include_indices
+        .iter()
+        .map(|idx| index_map[idx])
+        .collect::<Vec<_>>();
+
+    ProjectionPlan {
+        projection,
+        projected_headers,
+        join_indices: join_positions,
+        include_indices: include_positions,
+    }
+}
+
+fn project_record(record: &csv::StringRecord, projection: &[usize]) -> Vec<String> {
+    projection
+        .iter()
+        .map(|&idx| record.get(idx).unwrap_or("").to_string())
+        .collect()
 }
 
 fn make_key(row: &[String], indices: &[usize]) -> Vec<String> {
@@ -827,17 +921,6 @@ fn write_stream_combinations(
             }
         }
     }
-}
-
-fn make_key_from_record(record: &csv::StringRecord, indices: &[usize]) -> Vec<String> {
-    indices
-        .iter()
-        .map(|&idx| record.get(idx).unwrap_or("").to_string())
-        .collect()
-}
-
-fn record_to_vec(record: &csv::StringRecord) -> Vec<String> {
-    record.iter().map(|s| s.to_string()).collect()
 }
 
 fn write_combinations(

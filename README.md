@@ -141,6 +141,8 @@ tsvkit join -f subject_id examples/samples.tsv examples/subjects.tsv
 
 Control join type with `-k` (`-k 0` = full outer). Pick which columns from each file to emit with `-F/--select`; by default every non-key column from every file is included. The selector syntax matches `-f`: separate per-file specs with semicolons (`samples_cols;subjects_cols`), and within each spec use commas/ranges to list the columns you want to keep. Add `--sorted` to stream when inputs are pre-sorted on the key.
 
+`tsvkit join` also prunes unneeded input columns before building its data structures, so selecting a narrower set of outputs can significantly reduce memory and runtime.
+
 ### `mutate`
 
 Create derived columns or rewrite values using expressions.
