@@ -30,6 +30,7 @@ The repository ships curated example tables under `examples/` that are used thro
 
 You can download the repository, inspect the files directly, or adapt them to your own pipelines.
 
+
 ## Quick Start Pipeline
 
 Join sample and subject metadata, derive a total cytokine score, filter high-purity case samples, and pretty-print the result:
@@ -39,7 +40,18 @@ cat examples/cytokines.tsv \
   | tsvkit mutate -e 'total=sum($IL6:$IL10)' -e 'log_total=log2($total)' \
   | tsvkit join -f 'sample_id;sample_id' -k 0 - examples/samples.tsv \
   | tsvkit filter -e '$group == "case" & $purity >= 0.94' \
+  | tsvkit cut -f 'sample_id:IL10,log_total:purity' \
   | tsvkit pretty
+```
+
+_Output_
+```
++-----------+-----+-----+------+------+-----------+------------+-------+-----------+--------+
+| sample_id | IL6 | TNF | IFNG | IL10 | log_total | subject_id | group | timepoint | purity |
++-----------+-----+-----+------+------+-----------+------------+-------+-----------+--------+
+| S01       | 4.2 | 3.1 | 6.8  | 2.4  | 4.044394  | P001       | case  | baseline  | 0.94   |
+| S03       | 4.9 | 3.6 | 7.4  | 2.6  | 4.209453  | P001       | case  | week4     | 0.96   |
++-----------+-----+-----+------+------+-----------+------------+-------+-----------+--------+
 ```
 
 The same pipeline works if the cytokine table is compressed (`examples/cytokines.tsv.gz`).
@@ -59,6 +71,7 @@ tsvkit join \
   -f 'subject_id;subject_id' \
   examples/samples.tsv examples/subjects.tsv
 ```
+
 _Output (first rows)_
 ```
 subject_id	sample_id	group	timepoint	purity	dna_ug	rna_ug	contamination_pct	tech	age	sex	site	bmi	smoker_status
@@ -66,16 +79,21 @@ P001	S01	case	baseline	0.94	25.3	18.1	0.02	sRNA-seq	45	F	Seattle	27.1	former
 P001	S03	case	week4	0.96	27.4	19.8	0.01	sRNA-seq	45	F	Seattle	27.1	former
 ```
 
+Since join by the same field name for both files, we can only specify it once with: `-f subject_id`. 
+
 Use `-k 0` for a full outer join, or comma-separated indices (e.g., `-k 1,3`) to retain keys from selected files. Add `--sorted` when all inputs are pre-sorted by the join key to stream without buffering entire tables.
 
 Limit the output columns per file with `-s/--select` (same syntax as `-f/--fields`):
 
 ```bash
 tsvkit join \
-  -f 'subject_id;subject_id' \
-  -s 'sample_id,group;age,sex' \
+  -f 'subject_id' \
+  -s 'sample_id,group;age:sex' \
   examples/samples.tsv examples/subjects.tsv
 ```
+
+In the field selector expression (following `-f`, `-s`), use `,` to separate multiple field names within the same file, and `;` to separate fields from different files in the order of input files. Use `:` to specify consecutive fields to select from the same file.
+
 
 ### `mutate`
 
@@ -177,8 +195,8 @@ Create new columns or rewrite existing ones using row-wise expressions. Numeric 
 
 ```bash
 tsvkit mutate \
-  -e "total=sum($IL6:$IL10)" \
-  -e "label=sub($sample_id,\"S\",\"Sample_\")" \
+  -e 'total=sum($IL6:$IL10)' \
+  -e 'label=sub($sample_id,"S","Sample_")' \
   examples/cytokines.tsv
 ```
 _Output_
@@ -191,7 +209,20 @@ S02	3.9	2.7	5.5	2.0	14.1	Sample_02
 In-place substitution uses a sed-like syntax:
 
 ```bash
-tsvkit mutate -e 's/$group/control/CTRL/' examples/samples.tsv
+tsvkit mutate -e 's/$group/control/CTRL/' examples/samples.tsv | tsvkit pretty
+```
+_Output_
+```
++-----------+------------+-------+-----------+--------+--------+--------+-------------------+----------+
+| sample_id | subject_id | group | timepoint | purity | dna_ug | rna_ug | contamination_pct | tech     |
++-----------+------------+-------+-----------+--------+--------+--------+-------------------+----------+
+| S01       | P001       | case  | baseline  | 0.94   | 25.3   | 18.1   | 0.02              | sRNA-seq |
+| S02       | P002       | CTRL  | baseline  | 0.90   | 22.8   | 17.5   | 0.03              | sRNA-seq |
+| S03       | P001       | case  | week4     | 0.96   | 27.4   | 19.8   | 0.01              | sRNA-seq |
+| S04       | P003       | case  | baseline  | 0.88   | 20.1   | 16.2   | 0.05              | nanopore |
+| S05       | P002       | CTRL  | week4     | 0.92   | 24.0   | 17.9   | 0.02              | sRNA-seq |
+| S06       | P004       | CTRL  | baseline  | 0.91   | 23.7   | 17.2   | 0.04              | nanopore |
++-----------+------------+-------+-----------+--------+--------+--------+-------------------+----------+
 ```
 
 ---
