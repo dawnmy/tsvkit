@@ -30,7 +30,6 @@ The repository ships curated example tables under `examples/` that are used thro
 
 You can download the repository, inspect the files directly, or adapt them to your own pipelines.
 
-
 ## Quick Start Pipeline
 
 Join sample and subject metadata, derive a total cytokine score, filter high-purity case samples, and pretty-print the result:
@@ -44,6 +43,8 @@ cat examples/cytokines.tsv \
   | tsvkit pretty
 ```
 
+> Tip: wrap every `-e` expression in single quotes so your shell keeps `$column` selectors intact. Inside an expression, always prefix column references with `$` (e.g. `$total`, `$1`).
+
 _Output_
 ```
 +-----------+-----+-----+------+------+-----------+------------+-------+-----------+--------+
@@ -56,84 +57,110 @@ _Output_
 
 The same pipeline works if the cytokine table is compressed (`examples/cytokines.tsv.gz`).
 
+## Core Concepts
+
+These conventions appear across the toolkit; understanding them once makes each subcommand predictable.
+
+### Column selectors
+
+- **Names**: `sample_id,purity`
+- **1-based indices**: `1,4,9`
+- **Ranges**: `IL6:IL10`, `2:5`
+- **Mixed lists**: `sample_id,3:5,tech`
+- **Multi-file specs**: separate selectors for each input with semicolons, e.g. `sample_id;subject_id` for `join -f`.
+
+Anywhere you access column *values* inside an expression, prefix the selector with `$` (`$purity`, `$1`, `$IL6:$IL10`).
+
+### Expression language
+
+- Quote each `-e` argument with single quotes so the shell leaves `$column` references untouched.
+- Use double quotes inside expressions for string literals (`"case"`).
+- Arithmetic operators: `+ - * /`; comparisons: `== != < <= > >=`.
+- Logical combinators: `&` and `|` (or `and`/`or`); negation: `!`/`not`.
+- Regex operators: `~` (match) and `!~` (does not match). Patterns follow Rust's `regex` crate syntax.
+- Numeric helpers: `abs`, `sqrt`, `exp`, `exp2`, `ln`, `log`/`log10`, `log2`.
+- String helpers in `mutate`: `sub(column, pattern, replacement)` and the sed-inspired `s/cols/pattern/replacement/` syntax.
+
+### Aggregations
+
+Aggregators support descriptive statistics in `summarize` and row-wise calculations in `mutate`:
+
+- Totals and averages: `sum`, `mean`/`avg`
+- Spread: `sd`/`std`
+- Medians: `median`/`med`
+- Quantiles: `q1`, `q2`, `q3`, `q4`, `q0.25`, `p95`, etc. (`q` = fraction, `p` = percentile)
+
+### CLI conventions
+
+- Every command accepts files or `-` (stdin) and auto-detects `.tsv`, `.tsv.gz`, and `.tsv.xz` inputs.
+- Add `-H/--no-header` when your data lacks a header row; selectors fall back to 1-based indices.
+- Commands are stream-friendly—pipe them freely to build larger workflows.
+
 ---
 
 ## Command Reference
 
-Each subsection highlights the core options and shows realistic invocations using the example dataset.
+Each subsection highlights the core options, shows realistic invocations, and calls out relevant selectors or expressions.
+
+### `cut`
+
+Select or reorder columns by name, index, or range.
+
+```bash
+tsvkit cut -f 'sample_id,group,purity,tech' examples/samples.tsv
+```
+
+Ranges expand consecutive columns automatically:
+
+```bash
+tsvkit cut -f 'sample_id,IL6:IL10' examples/cytokines.tsv
+```
+
+### `filter`
+
+Filter rows with boolean logic, arithmetic, and regexes.
+
+```bash
+tsvkit filter -e '$group == "case" & $purity >= 0.94' examples/samples.tsv
+```
+
+Regex operators `~` / `!~` make pattern filters concise:
+
+```bash
+tsvkit filter -e '$tech ~ "sRNA"' examples/samples.tsv
+```
 
 ### `join`
 
-Merge TSV files on key columns. Provide selectors with `-f/--fields`; when all files use the same key, specify it once. Every file must contribute the same number of key columns. Use `-s/--select` to control which non-key columns are emitted per file (defaults to all).
+Merge tables on shared keys. Provide selectors with `-f/--fields`; when all inputs use the same key you can specify it once.
 
 ```bash
-tsvkit join \
-  -f 'subject_id;subject_id' \
-  examples/samples.tsv examples/subjects.tsv
+tsvkit join -f subject_id examples/samples.tsv examples/subjects.tsv
 ```
 
-_Output (first rows)_
-```
-subject_id	sample_id	group	timepoint	purity	dna_ug	rna_ug	contamination_pct	tech	age	sex	site	bmi	smoker_status
-P001	S01	case	baseline	0.94	25.3	18.1	0.02	sRNA-seq	45	F	Seattle	27.1	former
-P001	S03	case	week4	0.96	27.4	19.8	0.01	sRNA-seq	45	F	Seattle	27.1	former
-```
-
-Since join by the same field name for both files, we can only specify it once with: `-f subject_id`. 
-
-Use `-k 0` for a full outer join, or comma-separated indices (e.g., `-k 1,3`) to retain keys from selected files. Add `--sorted` when all inputs are pre-sorted by the join key to stream without buffering entire tables.
-
-Limit the output columns per file with `-s/--select` (same syntax as `-f/--fields`):
-
-```bash
-tsvkit join \
-  -f 'subject_id' \
-  -s 'sample_id,group;age:sex' \
-  examples/samples.tsv examples/subjects.tsv
-```
-
-In the field selector expression (following `-f`, `-s`), use `,` to separate multiple field names within the same file, and `;` to separate fields from different files in the order of input files. Use `:` to specify consecutive fields to select from the same file.
-
+Control join type with `-k` (`-k 0` = full outer). Choose additional columns from each file with `-s/--select`; by default every non-key column from every file is emitted. The selector syntax matches `-f`: separate per-file specs with semicolons (`samples_cols;subjects_cols`), and within each spec use commas/ranges to list the columns you want to keep. Add `--sorted` to stream when inputs are pre-sorted on the key.
 
 ### `mutate`
 
-Create new columns or rewrite existing ones with row-wise expressions. Numeric helpers accept column ranges (`$IL6:$IL10`) or individual columns.
+Create derived columns or rewrite values using expressions.
 
 ```bash
 tsvkit mutate \
-  -e 'total_cytokines=sum($IL6:$IL10)' \
-  -e 'scaled=mean($IL6:$IL10)' \
+  -e 'total=sum($IL6:$IL10)' \
+  -e 'log_total=log2($total)' \
   -e 'label=sub($sample_id,"S","Sample_")' \
   examples/cytokines.tsv
 ```
-_Output_
-```
-sample_id	IL6	TNF	IFNG	IL10	total_cytokines	scaled	label
-S01	4.2	3.1	6.8	2.4	16.5	4.125000	Sample_01
-S02	3.9	2.7	5.5	2.0	14.1	3.525000	Sample_02
-```
 
-In-place substitution uses `s/columns/pattern/replacement/` syntax:
+Apply in-place edits with the sed-style form:
 
 ```bash
 tsvkit mutate -e 's/$group/ctrl/control/' examples/samples.tsv
 ```
 
-### `slice`
-
-Select rows by index or range (headers are always preserved when present).
-
-```bash
-tsvkit slice -r 1,4:5 examples/samples.tsv
-```
-
-Use ranges to grab larger spans, e.g. `tsvkit slice -r 10:20,100 data.tsv`.
-
----
-
 ### `summarize`
 
-Group rows and compute descriptive statistics. Omitting `-g` aggregates across the whole table.
+Group rows and compute descriptive statistics.
 
 ```bash
 tsvkit summarize \
@@ -142,90 +169,14 @@ tsvkit summarize \
   -s 'dna_ug:contamination_pct=q1,q3' \
   examples/samples.tsv
 ```
-_Output_
-```
-group	purity_mean	purity_sd	dna_ug_q1	dna_ug_q3	contamination_pct_q1	contamination_pct_q3
-case	0.926667	0.034435	20.700000	26.650000	0.015000	0.045000
-control	0.910000	0.010000	22.850000	24.000000	0.020000	0.032500
-```
-
-Quantiles accept aliases (`q1`, `q2`, `q75`, `p95`) or fractions (`q0.25`).
-
-### `filter`
-
-Filter with boolean expressions, regex matches, arithmetic, and numeric functions.
-
-```bash
-tsvkit filter \
-  -e '$group == "case" & $purity >= 0.94 & log2($dna_ug) > 4.6' \
-  examples/samples.tsv
-```
-
-Regex operators `~` and `!~` make pattern filters concise (use double quotes for literal substrings, `/regex/` for patterns):
-
-```bash
-tsvkit filter -e '$tech ~ "sRNA"' examples/samples.tsv
-```
-
-### `cut`
-
-Select/reorder columns by name, index, or range.
-
-```bash
-tsvkit cut -f 'sample_id,group,purity,tech' examples/samples.tsv
-```
-
-Ranges expand automatically:
-
-```bash
-tsvkit cut -f 'sample_id,IL6:IL10' examples/cytokines.tsv
-```
 
 ### `sort`
 
-Sort by one or more keys. Modifiers: `:n` (numeric asc), `:nr` (numeric desc), `:r` (reverse text).
+Sort rows by one or more keys. Modifiers: `:n` (numeric), `:nr` (numeric descending), `:r` (reverse text).
 
 ```bash
 tsvkit sort -k purity:nr -k contamination_pct examples/samples.tsv
 ```
-
-### `mutate`
-
-Create new columns or rewrite existing ones using row-wise expressions. Numeric helpers accept column ranges and ignore non-numeric values. String helpers such as `sub()` or `s/.../.../.../` make cleanup easy.
-
-```bash
-tsvkit mutate \
-  -e 'total=sum($IL6:$IL10)' \
-  -e 'label=sub($sample_id,"S","Sample_")' \
-  examples/cytokines.tsv
-```
-_Output_
-```
-sample_id	IL6	TNF	IFNG	IL10	total	label
-S01	4.2	3.1	6.8	2.4	16.5	Sample_01
-S02	3.9	2.7	5.5	2.0	14.1	Sample_02
-```
-
-In-place substitution uses a sed-like syntax:
-
-```bash
-tsvkit mutate -e 's/$group/control/CTRL/' examples/samples.tsv | tsvkit pretty
-```
-_Output_
-```
-+-----------+------------+-------+-----------+--------+--------+--------+-------------------+----------+
-| sample_id | subject_id | group | timepoint | purity | dna_ug | rna_ug | contamination_pct | tech     |
-+-----------+------------+-------+-----------+--------+--------+--------+-------------------+----------+
-| S01       | P001       | case  | baseline  | 0.94   | 25.3   | 18.1   | 0.02              | sRNA-seq |
-| S02       | P002       | CTRL  | baseline  | 0.90   | 22.8   | 17.5   | 0.03              | sRNA-seq |
-| S03       | P001       | case  | week4     | 0.96   | 27.4   | 19.8   | 0.01              | sRNA-seq |
-| S04       | P003       | case  | baseline  | 0.88   | 20.1   | 16.2   | 0.05              | nanopore |
-| S05       | P002       | CTRL  | week4     | 0.92   | 24.0   | 17.9   | 0.02              | sRNA-seq |
-| S06       | P004       | CTRL  | baseline  | 0.91   | 23.7   | 17.2   | 0.04              | nanopore |
-+-----------+------------+-------+-----------+--------+--------+--------+-------------------+----------+
-```
-
----
 
 ### `melt`
 
@@ -234,16 +185,10 @@ Convert wide tables into tidy long form.
 ```bash
 tsvkit melt -i sample_id -v IL6:IL10 examples/cytokines.tsv
 ```
-_Output_
-```
-sample_id	variable	value
-S01	IL6	4.2
-S01	TNF	3.1
-```
 
 ### `pivot`
 
-Promote long-form values to columns.
+Promote long-form values to columns. `-c/--column` also accepts the short alias `-f` for consistency with other commands.
 
 ```bash
 tsvkit pivot -i gene -c sample_id -v expression examples/expression.tsv
@@ -251,7 +196,7 @@ tsvkit pivot -i gene -c sample_id -v expression examples/expression.tsv
 
 ### `slice`
 
-Select rows by index or range (headers are always preserved when present).
+Take specific rows (1-based indices or ranges).
 
 ```bash
 tsvkit slice -r 1,4:5 examples/samples.tsv
@@ -259,21 +204,17 @@ tsvkit slice -r 1,4:5 examples/samples.tsv
 
 ### `pretty`
 
-Render aligned, boxed tables for quick inspection.
+Render aligned, boxed output for quick inspection.
 
 ```bash
-tsvkit filter -e '$group == "case"' examples/samples.tsv \
-  | tsvkit pretty
+tsvkit filter -e '$group == "case"' examples/samples.tsv | tsvkit pretty
 ```
 
----
+## Additional Tips
 
-## Advanced Tips
-
-- **Compressed input**: `tsvkit` automatically detects `.gz` and `.xz` files. Pipe from `curl`/`zcat` for other formats.
-- **Column selectors**: Anywhere you select columns you can use names, 1-based indices, ranges (`colA:colD`, `2:6`), or mixes (`$sample1:$sample3,$dna_ug`). Always quote expressions containing `$` in your shell (e.g. use single quotes) so column references are not expanded.
-- **Expressions**: Numeric functions ignore empty/non-numeric values; string helpers understand double-quoted literals with standard escapes.
-- **Streaming joins**: Combine `sort` + `join --sorted` to handle very large datasets with constant memory.
+- `tsvkit` automatically detects `.tsv`, `.tsv.gz`, and `.tsv.xz`. Pipe from `curl`/`zcat` for other formats.
+- Numeric functions treat empty cells as missing; regex syntax follows Rust's `regex` crate.
+- For massive joins, pre-sort inputs and use `join --sorted` to keep memory usage flat.
 
 ## Contributing
 

@@ -10,7 +10,7 @@ use crate::expression::{bind_expression, evaluate, parse_expression};
 #[derive(Args, Debug)]
 #[command(
     about = "Filter TSV rows using boolean expressions",
-    long_about = r#"Filter rows using expressions with column references ($name or $index), comparisons, logical operators, arithmetic, regex (~ and !~), and numeric functions (abs, sqrt, exp, exp2, ln, log, log10, log2). Strings require double quotes. Defaults to header-aware mode; add -H for headerless input.
+    long_about = r#"Filter rows using expressions with column references ($name or $index), comparisons, logical operators, arithmetic, regex (~ and !~), and numeric functions (abs, sqrt, exp, exp2, ln, log, log10, log2). Wrap each -e argument in single quotes so the shell preserves $column selectors; inside the expression, use double quotes around string literals. Defaults to header-aware mode; add -H for headerless input.
 
 Examples:
   tsvkit filter -e '$sample2>=5 & $sample3!=9' examples/profiles.tsv

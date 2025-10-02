@@ -23,8 +23,14 @@ pub struct PivotArgs {
     #[arg(short = 'i', long = "index", value_name = "COLS", required = true)]
     pub index_cols: String,
 
-    /// Column whose values become new column names in the output (single selector)
-    #[arg(short = 'c', long = "column", value_name = "COL", required = true)]
+    /// Column whose values become new column names in the output (single selector). Alias: -f.
+    #[arg(
+        short = 'c',
+        long = "column",
+        short_alias = 'f',
+        value_name = "COL",
+        required = true
+    )]
     pub column: String,
 
     /// Column whose values populate the pivoted cells (single selector)

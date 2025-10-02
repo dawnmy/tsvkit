@@ -11,7 +11,7 @@ use crate::expression::{BoundValue, bind_value_expression, eval_value, parse_val
 #[derive(Args, Debug)]
 #[command(
     about = "Create or transform TSV columns",
-    long_about = r#"Add derived columns or rewrite existing ones. Use -e/--expr to specify operations. Assignments can be arbitrary expressions (`name=EXPR`) using the filter expression language (column selectors, arithmetic, abs/sqrt/exp/ln/log/log2/log10/exp2, regex matches, etc.), row-wise aggregates (sum, mean, median, sd, q1–q4, q0.25, p95, etc.), or string helpers like sub(). Always prefix column references with `$`, including columns created earlier in the same invocation (e.g. `log_total=log2($total)`). You can also run in-place substitutions with sed-style syntax s/selectors/pattern/replacement/.
+    long_about = r#"Add derived columns or rewrite existing ones. Use -e/--expr to specify operations. Assignments can be arbitrary expressions (`name=EXPR`) using the filter expression language (column selectors, arithmetic, abs/sqrt/exp/ln/log/log2/log10/exp2, regex matches, etc.), row-wise aggregates (sum, mean, median, sd, q1–q4, q0.25, p95, etc.), or string helpers like sub(). Always prefix column references with `$`, including columns created earlier in the same invocation (e.g. `log_total=log2($total)`), and wrap each -e argument in single quotes so the shell leaves `$` selectors alone. You can also run in-place substitutions with sed-style syntax s/selectors/pattern/replacement/.
 
 Examples:
   tsvkit mutate -e "coverage_sum=sum($1,$3:$5)" examples/profiles.tsv
