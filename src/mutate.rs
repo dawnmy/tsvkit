@@ -11,7 +11,7 @@ use crate::expression::{BoundValue, bind_value_expression, eval_value, parse_val
 #[derive(Args, Debug)]
 #[command(
     about = "Create or transform TSV columns",
-    long_about = r#"Add derived columns or rewrite existing ones. Use -e/--expr to specify operations. Assignments can be arbitrary expressions (`name=EXPR`) using the filter expression language (column selectors, arithmetic, abs/sqrt/exp/ln/log/log2/log10/exp2, regex matches, etc.), row-wise aggregates (sum, mean, median, sd, q1–q4, q0.25, p95, etc.), or string helpers like sub(). You can also run in-place substitutions with sed-style syntax s/selectors/pattern/replacement/.
+    long_about = r#"Add derived columns or rewrite existing ones. Use -e/--expr to specify operations. Assignments can be arbitrary expressions (`name=EXPR`) using the filter expression language (column selectors, arithmetic, abs/sqrt/exp/ln/log/log2/log10/exp2, regex matches, etc.), row-wise aggregates (sum, mean, median, sd, q1–q4, q0.25, p95, etc.), or string helpers like sub(). Always prefix column references with `$`, including columns created earlier in the same invocation (e.g. `log_total=log2($total)`). You can also run in-place substitutions with sed-style syntax s/selectors/pattern/replacement/.
 
 Examples:
   tsvkit mutate -e "coverage_sum=sum($1,$3:$5)" examples/profiles.tsv
@@ -169,15 +169,28 @@ fn parse_operations(
     no_header: bool,
 ) -> Result<Vec<MutateOp>> {
     let mut ops = Vec::new();
+    let mut current_headers = headers.to_vec();
     for expr in exprs {
         let trimmed = expr.trim();
         if trimmed.is_empty() {
             bail!("mutation expression must not be empty");
         }
         if trimmed.starts_with("s/") {
-            ops.push(parse_substitution_expression(trimmed, headers, no_header)?);
+            ops.push(parse_substitution_expression(
+                trimmed,
+                &current_headers,
+                no_header,
+            )?);
         } else {
-            ops.push(parse_assignment_expression(trimmed, headers, no_header)?);
+            let op = parse_assignment_expression(trimmed, &current_headers, no_header)?;
+            if let MutateOp::Create { name, .. } = &op {
+                if no_header {
+                    current_headers.push(format!("col{}", current_headers.len() + 1));
+                } else {
+                    current_headers.push(name.clone());
+                }
+            }
+            ops.push(op);
         }
     }
     Ok(ops)
@@ -534,5 +547,39 @@ mod tests {
         let value: f64 = row[2].parse().unwrap();
         let expected = 1.0f64.exp() - 2.0f64.exp2();
         assert!((value - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn subsequent_assignments_can_reference_new_columns() {
+        let headers = vec![
+            "sample_id".to_string(),
+            "IL6".to_string(),
+            "IL7".to_string(),
+            "IL8".to_string(),
+            "IL9".to_string(),
+            "IL10".to_string(),
+        ];
+        let ops = parse_operations(
+            &vec![
+                "total=sum($IL6:$IL10)".to_string(),
+                "log_total=log2($total)".to_string(),
+            ],
+            &headers,
+            false,
+        )
+        .unwrap();
+        let mut row = vec![
+            "S1".to_string(),
+            "1".to_string(),
+            "1".to_string(),
+            "1".to_string(),
+            "1".to_string(),
+            "1".to_string(),
+        ];
+        process_row(&mut row, &ops).unwrap();
+        assert_eq!(row.len(), 8);
+        assert_eq!(row[6], "5");
+        let log_total: f64 = row[7].parse().unwrap();
+        assert!((log_total - 5f64.log2()).abs() < 1e-6);
     }
 }

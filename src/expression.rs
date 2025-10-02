@@ -846,7 +846,11 @@ impl Parser {
             Some(Token::Ident(_)) => {
                 if let Some(Token::Ident(name)) = self.advance().cloned() {
                     if !self.consume_token(TokenKind::LParen) {
-                        bail!("function '{}' must be followed by parentheses", name);
+                        bail!(
+                            "identifier '{}' is not a function; prefix column names with '$' (e.g. '${}')",
+                            name,
+                            name
+                        );
                     }
                     let argument = self.parse_arith()?;
                     if !self.consume_token(TokenKind::RParen) {

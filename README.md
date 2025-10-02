@@ -36,7 +36,7 @@ Join sample and subject metadata, derive a total cytokine score, filter high-pur
 
 ```bash
 cat examples/cytokines.tsv \
-  | tsvkit mutate -e 'total=sum($IL6:$IL10)' -e 'log_total=log2(total)' \
+  | tsvkit mutate -e 'total=sum($IL6:$IL10)' -e 'log_total=log2($total)' \
   | tsvkit join -f 'sample_id;sample_id' -k 0 - examples/samples.tsv \
   | tsvkit filter -e '$group == "case" & $purity >= 0.94' \
   | tsvkit pretty
