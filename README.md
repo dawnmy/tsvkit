@@ -84,8 +84,10 @@ These conventions appear across the toolkit; understanding them once makes each 
 
 - **Names**: `sample_id,purity`
 - **1-based indices**: `1,4,9`
-- **Ranges**: `IL6:IL10`, `2:5`
+- **Ranges**: `IL6:IL10`, `2:5`, open-ended forms like `:IL10` (from the first column) or `IL6:` (through the last column)
+- **Whole-table**: `:` selects every column in order
 - **Mixed lists**: `sample_id,3:5,tech`
+- **Clustered sequences**: combine selectors such as `sample_id,quality:` or `:purity,tech`
 - **Multi-file specs**: separate selectors for each input with semicolons, e.g. `sample_id;subject_id` for `join -f`.
 
 Anywhere you access column *values* inside an expression, prefix the selector with `$` (`$purity`, `$1`, `$IL6:$IL10`).
@@ -146,10 +148,13 @@ Filter rows with boolean logic, arithmetic, and regexes.
 tsvkit filter -e '$group == "case" & $purity >= 0.94' examples/samples.tsv
 ```
 
-Regex operators `~` / `!~` make pattern filters concise:
+Regex operators `~` / `!~` make pattern filters concise and now work across column ranges:
 
 ```bash
 tsvkit filter -e '$tech ~ "sRNA"' examples/samples.tsv
+tsvkit filter -e '$gene:$notes ~ "kinase"' data.tsv   # match either column
+tsvkit filter -e '$expr:, $status ~ "fail"' qc.tsv     # mixed open range + column list
+tsvkit filter -e '~ "control"' results.tsv             # search all columns
 ```
 
 ### `join`
