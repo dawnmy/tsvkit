@@ -92,7 +92,7 @@ pub struct ExcelArgs {
     #[arg(short = 'o', long = "out", value_name = "FILE", requires = "load")]
     pub output: Option<PathBuf>,
 
-    /// Treat TSV inputs as headerless when loading
+    /// Treat sheets/TSV inputs as headerless (no header row)
     #[arg(short = 'H', long = "no-header", action = ArgAction::SetTrue)]
     pub no_header: bool,
 
@@ -145,7 +145,7 @@ struct SheetRef {
 
 #[derive(Debug, Clone)]
 struct ColumnToken {
-    start: String,
+    start: Option<String>,
     end: Option<String>,
 }
 
@@ -236,13 +236,19 @@ fn preview_workbook(path: &Path, args: &ExcelArgs) -> Result<()> {
     };
     let date_mode = args.dates.unwrap_or(DateMode::Iso);
 
+    let has_header = !args.no_header;
+
     if args.preview_pretty {
         for (pos, sheet) in sheets.iter().enumerate() {
             println!("#{} {}", sheet.index + 1, sheet.name);
             let (values, formulas) = load_sheet_ranges(&mut workbook, &sheet.name, value_mode)?;
-            let (header, rows) = collect_preview_rows(&values, formulas.as_ref(), head, date_mode);
-            if header.is_none() && rows.is_empty() {
+            let (header, rows) =
+                collect_preview_rows(&values, formulas.as_ref(), head, date_mode, has_header);
+            let (sheet_height, sheet_width) = values.get_size();
+            if sheet_height == 0 || sheet_width == 0 {
                 println!("<empty sheet>");
+            } else if header.is_none() && rows.is_empty() {
+                // no rows requested/displayed
             } else {
                 pretty::render_table(header, rows)?;
             }
@@ -258,7 +264,14 @@ fn preview_workbook(path: &Path, args: &ExcelArgs) -> Result<()> {
     for (pos, sheet) in sheets.iter().enumerate() {
         writeln!(output, "#{} {}", sheet.index + 1, sheet.name)?;
         let (values, formulas) = load_sheet_ranges(&mut workbook, &sheet.name, value_mode)?;
-        emit_preview(&mut output, &values, formulas.as_ref(), head, date_mode)?;
+        emit_preview(
+            &mut output,
+            &values,
+            formulas.as_ref(),
+            head,
+            date_mode,
+            has_header,
+        )?;
         if pos + 1 < sheets.len() {
             writeln!(output)?;
         }
@@ -287,7 +300,12 @@ fn dump_sheet(path: &Path, args: &ExcelArgs) -> Result<()> {
     let row_filter = args.rows.as_deref().map(parse_row_filter).transpose()?;
 
     let (values, formulas) = load_sheet_ranges(&mut workbook, &sheet.name, value_mode)?;
-    let headers = extract_headers(&values);
+    let has_header = !args.no_header;
+    let headers = if has_header {
+        extract_headers(&values)
+    } else {
+        Vec::new()
+    };
     let column_indices = column_tokens
         .map(|tokens| resolve_columns(&tokens, &headers, &values))
         .transpose()?;
@@ -304,6 +322,7 @@ fn dump_sheet(path: &Path, args: &ExcelArgs) -> Result<()> {
         date_mode,
         args.escape_tabs,
         args.escape_newlines,
+        has_header,
     )?;
     output.flush()?;
     Ok(())
@@ -399,13 +418,13 @@ fn parse_column_tokens(spec: &str) -> Result<Vec<ColumnToken>> {
         }
         if let Some((start, end)) = token.split_once(':') {
             tokens.push(ColumnToken {
-                start: start.trim().to_string(),
-                end: Some(end.trim().to_string()),
+                start: parse_optional_endpoint(start),
+                end: parse_optional_endpoint(end),
             });
         } else {
             tokens.push(ColumnToken {
-                start: token.to_string(),
-                end: None,
+                start: Some(token.to_string()),
+                end: Some(token.to_string()),
             });
         }
     }
@@ -413,6 +432,15 @@ fn parse_column_tokens(spec: &str) -> Result<Vec<ColumnToken>> {
         bail!("column specification must select at least one column");
     }
     Ok(tokens)
+}
+
+fn parse_optional_endpoint(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn parse_row_filter(spec: &str) -> Result<RowFilter> {
@@ -470,22 +498,27 @@ fn resolve_columns(
 ) -> Result<Vec<usize>> {
     let mut indices = BTreeSet::new();
     let sheet_width = max_sheet_width(values);
+    if sheet_width == 0 {
+        bail!("sheet contains no columns to select");
+    }
     for token in tokens {
-        let start = resolve_single_column(&token.start, headers, sheet_width)?;
-        if let Some(end_token) = &token.end {
-            let end = resolve_single_column(end_token, headers, sheet_width)?;
-            if start > end {
-                bail!(
-                    "column range start {} exceeds end {}",
-                    display_column(start),
-                    display_column(end)
-                );
-            }
-            for idx in start..=end {
-                indices.insert(idx);
-            }
-        } else {
-            indices.insert(start);
+        let start = match &token.start {
+            Some(text) => resolve_single_column(text, headers, sheet_width)?,
+            None => 0,
+        };
+        let end = match &token.end {
+            Some(text) => resolve_single_column(text, headers, sheet_width)?,
+            None => sheet_width - 1,
+        };
+        if start > end {
+            bail!(
+                "column range start {} exceeds end {}",
+                display_column(start),
+                display_column(end)
+            );
+        }
+        for idx in start..=end {
+            indices.insert(idx);
         }
     }
     Ok(indices.into_iter().collect())
@@ -566,13 +599,40 @@ fn emit_preview(
     formulas: Option<&Range<String>>,
     head: usize,
     date_mode: DateMode,
+    has_header: bool,
 ) -> Result<()> {
     let (height, width) = values.get_size();
     let start = values.start().unwrap_or((0, 0));
-    let mut emitted = 0usize;
-    let limit = height.min(head + 1); // header + head rows
 
-    for row_idx in 0..limit {
+    let mut emitted = 0usize;
+
+    if has_header && height > 0 {
+        let absolute_row = start.0 as usize;
+        let mut row_cells = Vec::with_capacity(width);
+        for col_idx in 0..width {
+            let absolute_col = start.1 as usize + col_idx;
+            let cell = values.get((0, col_idx));
+            let formula =
+                formulas.and_then(|r| r.get_value((absolute_row as u32, absolute_col as u32)));
+            row_cells.push(render_cell(cell, formula, date_mode));
+        }
+        writer.write_all(row_cells.join("\t").as_bytes())?;
+        writer.write_all(b"\n")?;
+        emitted += 1;
+    }
+
+    let data_limit = if has_header {
+        head.min(height.saturating_sub(1))
+    } else {
+        head.min(height)
+    };
+
+    let mut data_emitted = 0usize;
+    let start_row = if has_header { 1 } else { 0 };
+    for row_idx in start_row..height {
+        if data_emitted >= data_limit {
+            break;
+        }
         let absolute_row = start.0 as usize + row_idx;
         let mut row_cells = Vec::with_capacity(width);
         for col_idx in 0..width {
@@ -585,9 +645,10 @@ fn emit_preview(
         writer.write_all(row_cells.join("\t").as_bytes())?;
         writer.write_all(b"\n")?;
         emitted += 1;
+        data_emitted += 1;
     }
 
-    if emitted == 0 {
+    if emitted == 0 && (height == 0 || width == 0) {
         writer.write_all(b"<empty sheet>\n")?;
     }
 
@@ -599,6 +660,7 @@ fn collect_preview_rows(
     formulas: Option<&Range<String>>,
     head: usize,
     date_mode: DateMode,
+    has_header: bool,
 ) -> (Option<Vec<String>>, Vec<Vec<String>>) {
     let (height, width) = values.get_size();
     let start = match values.start() {
@@ -609,15 +671,43 @@ fn collect_preview_rows(
         return (None, Vec::new());
     }
 
-    let limit = height.min(head + 1);
-    if limit == 0 {
+    if height == 0 {
         return (None, Vec::new());
     }
 
     let mut header: Option<Vec<String>> = None;
     let mut rows = Vec::new();
 
-    for row_idx in 0..limit {
+    if has_header && height > 0 {
+        let absolute_row = start.0 as usize;
+        let mut cells = Vec::with_capacity(width);
+        for col_idx in 0..width {
+            let absolute_col = start.1 as usize + col_idx;
+            let text = render_cell(
+                values.get((0, col_idx)),
+                formulas.and_then(|r| r.get_value((absolute_row as u32, absolute_col as u32))),
+                date_mode,
+            );
+            cells.push(text);
+        }
+        header = Some(cells);
+    }
+
+    let data_limit = if has_header {
+        head.min(height.saturating_sub(1))
+    } else {
+        head.min(height)
+    };
+
+    if data_limit == 0 {
+        return (header, rows);
+    }
+
+    let start_row = if has_header { 1 } else { 0 };
+    for row_idx in start_row..height {
+        if rows.len() >= data_limit {
+            break;
+        }
         let absolute_row = start.0 as usize + row_idx;
         let mut cells = Vec::with_capacity(width);
         for col_idx in 0..width {
@@ -629,11 +719,7 @@ fn collect_preview_rows(
             );
             cells.push(text);
         }
-        if row_idx == 0 {
-            header = Some(cells);
-        } else {
-            rows.push(cells);
-        }
+        rows.push(cells);
     }
 
     (header, rows)
@@ -649,6 +735,7 @@ fn emit_table(
     date_mode: DateMode,
     escape_tabs: bool,
     escape_newlines: bool,
+    has_header: bool,
 ) -> Result<()> {
     let (height, width) = values.get_size();
     let start = values.start().unwrap_or((0, 0));
@@ -658,12 +745,39 @@ fn emit_table(
         (0..width).collect()
     };
 
-    let total_rows = height;
-    for row_idx in 0..height {
+    if has_header && height > 0 {
+        let absolute_row = start.0 as usize;
+        let mut header_cells = Vec::with_capacity(selected_columns.len());
+        for &col_idx in &selected_columns {
+            let absolute_col = start.1 as usize + col_idx;
+            let cell = values.get((0, col_idx));
+            let formula =
+                formulas.and_then(|r| r.get_value((absolute_row as u32, absolute_col as u32)));
+            let rendered = render_cell(cell, formula, date_mode);
+            header_cells.push(escape_text(&rendered, escape_tabs, escape_newlines));
+        }
+        writer.write_all(header_cells.join("\t").as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+
+    let data_total_rows = if has_header {
+        height.saturating_sub(1)
+    } else {
+        height
+    };
+
+    if data_total_rows == 0 {
+        return Ok(());
+    }
+
+    let mut data_row_number = 0usize;
+    let start_row = if has_header { 1 } else { 0 };
+
+    for row_idx in start_row..height {
         let absolute_row = start.0 as usize + row_idx;
-        let logical_row = absolute_row + 1; // 1-based
+        data_row_number += 1;
         if let Some(filter) = row_filter {
-            if !row_filter_contains(filter, logical_row, total_rows) {
+            if !row_filter_contains(filter, data_row_number, data_total_rows) {
                 continue;
             }
         }
