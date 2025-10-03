@@ -223,7 +223,7 @@ tsvkit pivot -i gene -c sample_id -v expression examples/expression.tsv
 
 ### `slice`
 
-Take specific rows (1-based indices or ranges).
+Take specific rows (1-based indices or ranges, including open-ended forms like `:10`, `10:`, or even `:` for everything).
 
 ```bash
 tsvkit slice -r 1,4:5 examples/samples.tsv
@@ -247,7 +247,7 @@ Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new
   tsvkit excel --sheets reports.xlsx
   ```
 
-- **Preview** the first rows of every sheet (header + N rows). Use `-s` to focus on one sheet, `-n` to change the window, `--formulas` to show Excel formulas instead of values, `--dates raw|excel|iso` to control date rendering (`iso` is the default), and `--pretty` to render the preview with aligned borders:
+- **Preview** the first rows of every sheet (header + N rows by default). Use `-s` to focus on one sheet, `-n` to change the window, `--formulas` to show Excel formulas instead of values, `--dates raw|excel|iso` to control date rendering (`iso` is the default), and `--pretty` to render the preview with aligned borders. Add `-H/--no-header` when the sheet lacks a header row so the preview shows raw rows only:
 
   ```bash
   tsvkit excel --preview reports.xlsx -n 5 -s Summary
@@ -255,7 +255,7 @@ Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new
   tsvkit excel --preview reports.xlsx --pretty
   ```
 
-- **Dump** a sheet (or subset) to TSV. Columns accept names, indices, or Excel letters/ranges (e.g. `A:C,Expr`). Rows accept 1-based indices or inclusive ranges (`1,10:20,100:`). `--na` replaces blanks, `--escape-*` makes TSV-safe output, and the same `--values/--formulas` + `--dates` controls apply:
+- **Dump** a sheet (or subset) to TSV. Columns accept names, indices, or Excel letters/ranges (e.g. `A:C,Expr`, `:C`, `C:`). Rows accept 1-based indices or inclusive ranges (`1,10:20,:25,100:`). `--na` replaces blanks, `--escape-*` makes TSV-safe output, and the same `--values/--formulas` + `--dates` controls apply. Use `-H/--no-header` when the sheet lacks a header row so column names fall back to indices:
 
   ```bash
   tsvkit excel --dump reports.xlsx -s Data -f 'A:C,Expr' -r 1:100 --na NA > data.tsv
