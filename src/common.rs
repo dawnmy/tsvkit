@@ -141,22 +141,7 @@ pub fn reader_for_path(
     no_header: bool,
     options: &InputOptions,
 ) -> Result<csv::Reader<Box<dyn io::Read>>> {
-    let reader: Box<dyn io::Read> = if path == Path::new("-") {
-        Box::new(io::stdin().lock())
-    } else {
-        let file =
-            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        let ext = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
-        match ext.as_str() {
-            "gz" => Box::new(MultiGzDecoder::new(file)),
-            "xz" => Box::new(XzDecoder::new(file)),
-            _ => Box::new(BufReader::new(file)),
-        }
-    };
+    let reader = open_path_reader(path)?;
 
     Ok(ReaderBuilder::new()
         .delimiter(b'\t')
@@ -164,6 +149,27 @@ pub fn reader_for_path(
         .comment(options.comment)
         .flexible(true)
         .from_reader(reader))
+}
+
+pub fn open_path_reader(path: &Path) -> Result<Box<dyn io::Read>> {
+    if path == Path::new("-") {
+        return Ok(Box::new(io::stdin().lock()));
+    }
+
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let reader: Box<dyn io::Read> = match ext.as_str() {
+        "gz" => Box::new(MultiGzDecoder::new(file)),
+        "xz" => Box::new(XzDecoder::new(file)),
+        _ => Box::new(BufReader::new(file)),
+    };
+
+    Ok(reader)
 }
 
 pub fn record_is_empty(record: &csv::StringRecord) -> bool {
