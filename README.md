@@ -1,6 +1,18 @@
 # tsvkit
 
-`tsvkit` is a fast, ergonomic toolkit for working with tab-separated values. Written in Rust, it brings familiar data-wrangling verbs (join, cut, filter, mutate, summarize, reshape, slice, pretty-print) to the command line with consistent column selection, rich expressions, and streaming-friendly performance. All commands accept input from files or `-` for stdin and transparently read `.tsv`, `.tsv.gz`, and `.tsv.xz` archives.
+`tsvkit` is a fast, ergonomic toolkit for working with TSV tables. Written in Rust, it brings familiar data-wrangling verbs (join, cut, filter, mutate, summarize, reshape, slice, pretty-print) to the command line with consistent column selection, rich expressions, and streaming-friendly performance. `tsvkit` is inspired by tools such as `csvtk`, `csvkit`, `datamash`, `awk`, `xsv`, and `mlr`. Many of its options are designed to be compatible with `csvtk` (https://github.com/shenwei356/csvtk), making it easier for existing users to adopt. 
+
+Compared with existing tools, `tsvkit` offers a more powerful and flexible way to select rows and columns. It combines versatile in- and output column selectors with an expression engine for statistics, filtering, and data transformation. This makes it possible, for example, to generate a gene expression matrix from `samtools idxstats` or `featureCounts` outputs of multiple samples in a single command:
+
+`tsvkit join -f <Gene> -F <Count> <all sample files>`, 
+
+to compute different summary statistics by groups across multiple columns, each with one or more stats functions:
+
+`tsvkit summarize -g group -s 'purity=mean,sd' -s 'dna_ug:contamination_pct=max,q3' examples/samples.tsv`.
+
+In addition, it natively supports previewing and processing multi-sheet Excel files, making it easier to work with complex datasets across both TSV and spreadsheet formats.
+
+All commands accept input from files or `-` for stdin and transparently read `.tsv`, `.tsv.gz`, and `.tsv.xz` archives.
 
 ## Installation
 
@@ -22,11 +34,18 @@ The repository ships curated example tables under `examples/` that are used thro
 
 | File | Description |
 | ---- | ----------- |
-| `samples.tsv` | Sample-level metrics (purity, yields, contamination) for six RNA-seq libraries. |
-| `subjects.tsv` | Subject demographics linked to samples via `subject_id`. |
-| `expression.tsv` | Long-form gene expression measurements (`sample_id`, `gene`, `expression`). |
+| `abundance.tsv` | Mock metagenomic counts with taxonomic kingdoms for quick pivot/stack demos. |
 | `cytokines.tsv` | Wide cytokine panel with one row per sample. |
+| `expression.tsv` | Long-form gene expression measurements (`sample_id`, `gene`, `expression`). |
+| `metadata.tsv` | Minimal ID → group lookup for join/filter illustrations. |
+| `profiles.tsv` | Wide expression profiles suitable for melt/pivot walkthroughs. |
 | `qc.tsv` | Sequencing QC metrics (reads, mapped percentage, duplication rate). |
+| `samples.tsv` | Sample-level metrics (purity, yields, contamination) for six RNA-seq libraries. |
+| `scores.tsv` | Tidy student scores table for summarize/group-by coverage. |
+| `subjects.tsv` | Subject demographics linked to samples via `subject_id`. |
+| `bioinfo_example.xlsx` | Two-sheet workbook (`Samples`, `Cytokines`) built from the TSVs above for the Excel tooling. |
+
+
 
 You can download the repository, inspect the files directly, or adapt them to your own pipelines.
 
@@ -109,7 +128,7 @@ Aggregators support descriptive statistics in `summarize` and row-wise calculati
 - Totals and averages: `sum`, `mean`/`avg`
 - Spread: `sd`/`std`
 - Medians: `median`/`med`
-- Quantiles: `q1`, `q2`, `q3`, `q4`, `q0.25`, `p95`, etc. (`q` = fraction, `p` = percentile)
+- Quantiles: `q1`, `q2`, `q3`, `q0.25`, `p95`, etc. (`q` = fraction, `p` = percentile)
 
 ### CLI conventions
 
@@ -239,15 +258,29 @@ tsvkit filter -e '$group == "case"' examples/samples.tsv | tsvkit pretty
 
 ### `excel`
 
-Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new workbooks from TSV inputs.
+Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new workbooks from TSV inputs. Unless `-H/--no-header` is supplied, the first row of each sheet is treated as the header row; use that flag when you need to preview or export raw rows.
 
-- **List sheets** with row/column counts and inferred column types:
+- **List sheets** (`--sheets`) with row/column counts and inferred column types:
 
   ```bash
-  tsvkit excel --sheets reports.xlsx
+  tsvkit excel --sheets examples/bioinfo_example.xlsx
   ```
 
-- **Preview** the first rows of every sheet (header + N rows by default). Use `-s` to focus on one sheet, `-n` to change the window, `--formulas` to show Excel formulas instead of values, `--dates raw|excel|iso` to control date rendering (`iso` is the default), and `--pretty` to render the preview with aligned borders. Add `-H/--no-header` when the sheet lacks a header row so the preview shows raw rows only:
+  _Output_
+  ```
+  1	Samples	rows=21	cols=4	types=[string,string,mixed,mixed]
+  2	Variants	rows=21	cols=4	types=[string,mixed,mixed,mixed]
+  3	Expression	rows=21	cols=3	types=[string,mixed,mixed]
+  4	Pathways	rows=11	cols=3	types=[string,string,mixed]
+  5	QC	rows=21	cols=4	types=[string,mixed,mixed,mixed]
+  6	ClinMetadata	rows=21	cols=4	types=[string,mixed,string,string]
+  7	Taxonomy	rows=21	cols=4	types=[string,mixed,mixed,mixed]
+  8	Coverage	rows=11	cols=2	types=[string,mixed]
+  9	Proteomics	rows=21	cols=3	types=[string,mixed,mixed]
+  10	Metabolites	rows=21	cols=2	types=[string,mixed]
+  ```
+
+- **Preview** (`--preview`) the first rows of every sheet (header + N rows by default). Use `-s` to focus on one sheet, `-n` to change the window, `--formulas` to show Excel formulas instead of values, `--dates raw|excel|iso` to control date rendering (`iso` is the default), and `--pretty` to render the preview with aligned borders. Add `-H/--no-header` when the sheet lacks a header row so the preview shows raw rows only:
 
   ```bash
   tsvkit excel --preview reports.xlsx -n 5 -s Summary
@@ -255,17 +288,62 @@ Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new
   tsvkit excel --preview reports.xlsx --pretty
   ```
 
-- **Dump** a sheet (or subset) to TSV. Columns accept names, indices, or Excel letters/ranges (e.g. `A:C,Expr`, `:C`, `C:`). Rows accept 1-based indices or inclusive ranges (`1,10:20,:25,100:`). `--na` replaces blanks, `--escape-*` makes TSV-safe output, and the same `--values/--formulas` + `--dates` controls apply. Use `-H/--no-header` when the sheet lacks a header row so column names fall back to indices:
-
   ```bash
-  tsvkit excel --dump reports.xlsx -s Data -f 'A:C,Expr' -r 1:100 --na NA > data.tsv
+  tsvkit excel --preview examples/bioinfo_example.xlsx -n 3 --pretty
   ```
 
-- **Load** one or more TSV files into a new workbook. Each `--load TSV` must be followed by `-s SHEETNAME`. Use `-H` when the TSV lacks headers, `--fields` to supply header names in that case, `--types infer|string` to control numeric inference, `--dates excel|iso|raw` to influence how date strings are written, `--na` to treat specific tokens as blanks, and `--max-rows-per-sheet` to split very tall sheets (defaults to Excel's 1,048,576 rows):
+  _Output_ (Only the first three sheets are shown below, the actual output has ten)
+  ```
+  #1 Samples
+  +----------+-------+--------+--------+
+  | SampleID | Group | Purity | DNA_ug |
+  +----------+-------+--------+--------+
+  | S001     | Case  | 0.744  | 3.05   |
+  | S002     | Case  | 0.837  | 8.59   |
+  | S003     | Case  | 0.703  | 1.15   |
+  +----------+-------+--------+--------+
+  
+  #2 Variants
+  +----------+------+--------+------+
+  | SampleID | SNPs | Indels | CNVs |
+  +----------+------+--------+------+
+  | S001     | 1217 | 130    | 13   |
+  | S002     | 3191 | 241    | 19   |
+  | S003     | 2463 | 210    | 8    |
+  +----------+------+--------+------+
+  
+  #3 Expression
+  +-------+-----------+--------------+
+  | Gene  | Expr_Case | Expr_Control |
+  +-------+-----------+--------------+
+  | Gene1 | 12.46     | 9.49         |
+  | Gene2 | 5.6       | 14.43        |
+  | Gene3 | 6.99      | 5.05         |
+  +-------+-----------+--------------+
+  ...
+  ```
+  
+
+- **Dump** (`--dump`) a sheet (or subset) to TSV. Columns accept names, indices, or Excel letters/ranges (e.g. `A:C,Expr`, `:C`, `C:`). Rows accept 1-based indices or inclusive ranges (`1,10:20,:25,100:`). `--na` replaces blanks, `--escape-*` makes TSV-safe output, and the same `--values/--formulas` + `--dates` controls apply. Use `-H/--no-header` when the sheet lacks a header row so column names fall back to indices:
 
   ```bash
-  tsvkit excel --load expr.tsv -s Expr meta.tsv -s Metadata -o result.xlsx
-  tsvkit excel --load ids.tsv -s IDs -o ids.xlsx --types string
+  tsvkit excel --dump examples/bioinfo_example.xlsx -s Samples -f 'SampleID,Group,Purity' -r 2:3 | tsvkit pretty
+  ```
+
+  _Output_
+  ```
+  +----------+-------+--------+
+  | SampleID | Group | Purity |
+  +----------+-------+--------+
+  | S002     | Case  | 0.837  |
+  | S003     | Case  | 0.703  |
+  +----------+-------+--------+
+  ```
+
+- **Load** (`--load`) one or more TSV files into a new workbook. Each `TSV` can be followed by `-s SHEETNAME`. Use `-H` when the TSV lacks headers, `--fields` to supply header names in that case, `--types infer|string` to control numeric inference, `--dates excel|iso|raw` to influence how date strings are written, `--na` to treat specific tokens as blanks, and `--max-rows-per-sheet` to split very tall sheets (defaults to Excel's 1,048,576 rows):
+
+  ```bash
+  tsvkit excel --load examples/samples.tsv -s Samples --load examples/cytokines.tsv -s Cytokines -o examples/testout.xlsx
   ```
 
 Only `.xlsx` files are supported at the moment. Sheets created via `--load` are renamed `Name (2)`, `Name (3)`, … when row limits force splits.
