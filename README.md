@@ -223,7 +223,7 @@ tsvkit pivot -i gene -c sample_id -v expression examples/expression.tsv
 
 ### `slice`
 
-Take specific rows (1-based indices or ranges).
+Take specific rows (1-based indices or ranges, including open-ended forms like `:10`, `10:`, or even `:` for everything).
 
 ```bash
 tsvkit slice -r 1,4:5 examples/samples.tsv
@@ -255,7 +255,7 @@ Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new
   tsvkit excel --preview reports.xlsx --pretty
   ```
 
-- **Dump** a sheet (or subset) to TSV. Columns accept names, indices, or Excel letters/ranges (e.g. `A:C,Expr`). Rows accept 1-based indices or inclusive ranges (`1,10:20,100:`). `--na` replaces blanks, `--escape-*` makes TSV-safe output, and the same `--values/--formulas` + `--dates` controls apply:
+- **Dump** a sheet (or subset) to TSV. Columns accept names, indices, or Excel letters/ranges (e.g. `A:C,Expr`, `:C`, `C:`). Rows accept 1-based indices or inclusive ranges (`1,10:20,:25,100:`). `--na` replaces blanks, `--escape-*` makes TSV-safe output, and the same `--values/--formulas` + `--dates` controls apply:
 
   ```bash
   tsvkit excel --dump reports.xlsx -s Data -f 'A:C,Expr' -r 1:100 --na NA > data.tsv
