@@ -1,6 +1,6 @@
 # tsvkit
 
-`tsvkit` is a fast, ergonomic toolkit for working with tab-separated values. Written in Rust, it brings familiar data-wrangling verbs (join, cut, filter, mutate, summarize, reshape, slice, pretty-print) to the command line with consistent column selection, rich expressions, and streaming-friendly performance. All commands accept input from files or `-` for stdin and transparently read `.tsv`, `.tsv.gz`, and `.tsv.xz` archives.
+`tsvkit` is a fast, ergonomic toolkit for working with TSV tables. Written in Rust, it brings familiar data-wrangling verbs (join, cut, filter, mutate, summarize, reshape, slice, pretty-print) to the command line with consistent column selection, rich expressions, and streaming-friendly performance. `tsvkit` is inspired by tools such as `csvtk`, `csvkit`, `datamash`, `awk`, `xsv`, and `mlr`. Many of its options are designed to be compatible with `csvtk`, making it easier for existing users to adopt. All commands accept input from files or `-` for stdin and transparently read `.tsv`, `.tsv.gz`, and `.tsv.xz` archives.
 
 ## Installation
 
@@ -27,6 +27,8 @@ The repository ships curated example tables under `examples/` that are used thro
 | `expression.tsv` | Long-form gene expression measurements (`sample_id`, `gene`, `expression`). |
 | `cytokines.tsv` | Wide cytokine panel with one row per sample. |
 | `qc.tsv` | Sequencing QC metrics (reads, mapped percentage, duplication rate). |
+
+
 
 You can download the repository, inspect the files directly, or adapt them to your own pipelines.
 
