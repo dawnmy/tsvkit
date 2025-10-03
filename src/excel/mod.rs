@@ -9,7 +9,7 @@ use calamine::{self, Data, ExcelDateTime, Range, Reader, Xlsx, open_workbook};
 use chrono::{Duration, NaiveTime};
 use clap::{ArgAction, ArgGroup, Args, ValueEnum};
 
-use crate::common::open_path_reader;
+use crate::{common::open_path_reader, pretty};
 
 const DEFAULT_PREVIEW_ROWS: usize = 10;
 const DEFAULT_MAX_ROWS_PER_SHEET: usize = 1_048_576;
@@ -71,6 +71,10 @@ pub struct ExcelArgs {
     /// Escape newlines as \n in dump output
     #[arg(long = "escape-newlines", action = ArgAction::SetTrue)]
     pub escape_newlines: bool,
+
+    /// Render preview output with aligned borders (like `tsvkit pretty`)
+    #[arg(long = "pretty", action = ArgAction::SetTrue, requires = "preview")]
+    pub preview_pretty: bool,
 
     /// Show evaluated values (default)
     #[arg(long = "values", action = ArgAction::SetTrue)]
@@ -231,6 +235,24 @@ fn preview_workbook(path: &Path, args: &ExcelArgs) -> Result<()> {
         ValueMode::Values
     };
     let date_mode = args.dates.unwrap_or(DateMode::Iso);
+
+    if args.preview_pretty {
+        for (pos, sheet) in sheets.iter().enumerate() {
+            println!("#{} {}", sheet.index + 1, sheet.name);
+            let (values, formulas) = load_sheet_ranges(&mut workbook, &sheet.name, value_mode)?;
+            let (header, rows) = collect_preview_rows(&values, formulas.as_ref(), head, date_mode);
+            if header.is_none() && rows.is_empty() {
+                println!("<empty sheet>");
+            } else {
+                pretty::render_table(header, rows)?;
+            }
+            if pos + 1 < sheets.len() {
+                println!();
+            }
+        }
+        return Ok(());
+    }
+
     let mut output = BufWriter::new(io::stdout().lock());
 
     for (pos, sheet) in sheets.iter().enumerate() {
@@ -570,6 +592,51 @@ fn emit_preview(
     }
 
     Ok(())
+}
+
+fn collect_preview_rows(
+    values: &Range<CellValue>,
+    formulas: Option<&Range<String>>,
+    head: usize,
+    date_mode: DateMode,
+) -> (Option<Vec<String>>, Vec<Vec<String>>) {
+    let (height, width) = values.get_size();
+    let start = match values.start() {
+        Some(s) => s,
+        None => return (None, Vec::new()),
+    };
+    if width == 0 {
+        return (None, Vec::new());
+    }
+
+    let limit = height.min(head + 1);
+    if limit == 0 {
+        return (None, Vec::new());
+    }
+
+    let mut header: Option<Vec<String>> = None;
+    let mut rows = Vec::new();
+
+    for row_idx in 0..limit {
+        let absolute_row = start.0 as usize + row_idx;
+        let mut cells = Vec::with_capacity(width);
+        for col_idx in 0..width {
+            let absolute_col = start.1 as usize + col_idx;
+            let text = render_cell(
+                values.get((row_idx, col_idx)),
+                formulas.and_then(|r| r.get_value((absolute_row as u32, absolute_col as u32))),
+                date_mode,
+            );
+            cells.push(text);
+        }
+        if row_idx == 0 {
+            header = Some(cells);
+        } else {
+            rows.push(cells);
+        }
+    }
+
+    (header, rows)
 }
 
 fn emit_table(

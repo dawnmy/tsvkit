@@ -84,7 +84,7 @@ pub fn run(args: PrettyArgs) -> Result<()> {
     render_table(header, rows)
 }
 
-fn render_table(header: Option<Vec<String>>, rows: Vec<Vec<String>>) -> Result<()> {
+pub fn render_table(header: Option<Vec<String>>, rows: Vec<Vec<String>>) -> Result<()> {
     let mut writer = BufWriter::new(io::stdout().lock());
 
     let column_count = compute_column_count(&header, &rows);
