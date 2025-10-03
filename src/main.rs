@@ -1,8 +1,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::env;
 
 mod common;
+mod csv;
 mod cut;
+mod excel;
 mod expression;
 mod filter;
 mod join;
@@ -49,10 +52,15 @@ enum Commands {
     Mutate(mutate::MutateArgs),
     /// Slice rows by 1-based index
     Slice(slice::SliceArgs),
+    /// Excel-focused helpers (inspect, preview, convert, load)
+    Excel(excel::ExcelArgs),
+    /// CSV utilities (convert to TSV)
+    Csv(csv::CsvArgs),
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let raw_args: Vec<_> = env::args_os().collect();
+    let cli = Cli::parse_from(raw_args.clone());
     match cli.command {
         Commands::Join(args) => join::run(args),
         Commands::Summarize(args) => summarize::run(args),
@@ -64,5 +72,7 @@ fn main() -> Result<()> {
         Commands::Sort(args) => sort::run(args),
         Commands::Mutate(args) => mutate::run(args),
         Commands::Slice(args) => slice::run(args),
+        Commands::Excel(args) => excel::run(args, &raw_args),
+        Commands::Csv(args) => csv::run(args),
     }
 }

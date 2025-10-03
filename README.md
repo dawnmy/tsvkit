@@ -71,6 +71,8 @@ The table below lists every `tsvkit` subcommand and a one-line purpose summary; 
 - [`pivot`](#pivot) — convert long form back to wide with optional fill value for missing cells.
 - [`slice`](#slice) — extract rows by 1-based indices or ranges.
 - [`pretty`](#pretty) — render aligned, boxed tables for quick inspection or sharing.
+- [`excel`](#excel) — inspect, preview, export, or build `.xlsx` workbooks.
+- [`csv`](#csv) — convert delimited text to TSV with custom separators.
 
 The following sections cover shared concepts first, then dive into each command with practical examples.
 
@@ -228,6 +230,56 @@ Render aligned, boxed output for quick inspection.
 
 ```bash
 tsvkit filter -e '$group == "case"' examples/samples.tsv | tsvkit pretty
+```
+
+### `excel`
+
+Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new workbooks from TSV inputs.
+
+- **List sheets** with row/column counts and inferred column types:
+
+  ```bash
+  tsvkit excel --sheets reports.xlsx
+  ```
+
+- **Preview** the first rows of every sheet (header + N rows). Use `-s` to focus on one sheet, `-n` to change the window, `--formulas` to show Excel formulas instead of values, and `--dates raw|excel|iso` to control date rendering (`iso` is the default):
+
+  ```bash
+  tsvkit excel --preview reports.xlsx -n 5 -s Summary
+  tsvkit excel --preview reports.xlsx --formulas --dates raw
+  ```
+
+- **Dump** a sheet (or subset) to TSV. Columns accept names, indices, or Excel letters/ranges (e.g. `A:C,Expr`). Rows accept 1-based indices or inclusive ranges (`1,10:20,100:`). `--na` replaces blanks, `--escape-*` makes TSV-safe output, and the same `--values/--formulas` + `--dates` controls apply:
+
+  ```bash
+  tsvkit excel --dump reports.xlsx -s Data -f 'A:C,Expr' -r 1:100 --na NA > data.tsv
+  ```
+
+- **Load** one or more TSV files into a new workbook. Each `--load TSV` must be followed by `-s SHEETNAME`. Use `-H` when the TSV lacks headers, `--fields` to supply header names in that case, `--types infer|string` to control numeric inference, `--dates excel|iso|raw` to influence how date strings are written, `--na` to treat specific tokens as blanks, and `--max-rows-per-sheet` to split very tall sheets (defaults to Excel's 1,048,576 rows):
+
+  ```bash
+  tsvkit excel --load expr.tsv -s Expr meta.tsv -s Metadata -o result.xlsx
+  tsvkit excel --load ids.tsv -s IDs -o ids.xlsx --types string
+  ```
+
+Only `.xlsx` files are supported at the moment. Sheets created via `--load` are renamed `Name (2)`, `Name (3)`, … when row limits force splits.
+When `-s` is omitted the sheet falls back to its 1-based position (`1`, `2`, …) in the load order, so a mixture of named and unnamed inputs still yields deterministic sheet names.
+
+### `csv`
+
+Convert delimited text into TSV. Use `--delim` to specify the input delimiter (default `,`) and `-H` when the source has no header row. The converter also mirrors common TSV-reader switches:
+
+- `-C/--comment-char` skips comment lines.
+- `-E/--ignore-empty-row` drops blank lines.
+- `-I/--ignore-illegal-row` skips rows whose width differs from the header/first row.
+- `--na STR` substitutes a string for empty fields (left blank by default).
+- `--lazy-quotes` treats stray quotes literally rather than erroring out.
+
+Compressed inputs work via the same auto-detection as other commands.
+
+```bash
+tsvkit csv examples/data.csv > examples/data.tsv
+tsvkit csv examples/semicolon.csv --delim ';' -H > tmp.tsv
 ```
 
 ## Additional Tips
