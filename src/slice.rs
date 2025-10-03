@@ -110,14 +110,12 @@ fn parse_row_spec(spec: &str) -> Result<Vec<RowRange>> {
             continue;
         }
         if let Some((start, end)) = trimmed.split_once(':') {
-            let start_idx = parse_positive_index(start)?;
-            let end_idx = parse_positive_index(end)?;
-            if start_idx > end_idx {
-                bail!(
-                    "row range start {} is greater than end {}",
-                    start_idx,
-                    end_idx
-                );
+            let start_idx = parse_optional_index(start)?;
+            let end_idx = parse_optional_index(end)?;
+            if let (Some(s), Some(e)) = (start_idx, end_idx) {
+                if s > e {
+                    bail!("row range start {} is greater than end {}", s, e);
+                }
             }
             ranges.push(RowRange {
                 start: start_idx,
@@ -126,12 +124,12 @@ fn parse_row_spec(spec: &str) -> Result<Vec<RowRange>> {
         } else {
             let idx = parse_positive_index(trimmed)?;
             ranges.push(RowRange {
-                start: idx,
-                end: idx,
+                start: Some(idx),
+                end: Some(idx),
             });
         }
     }
-    ranges.sort_by_key(|r| r.start);
+    ranges.sort_by_key(|r| r.start.unwrap_or(1));
     merge_ranges(ranges)
 }
 
@@ -143,8 +141,8 @@ fn merge_ranges(ranges: Vec<RowRange>) -> Result<Vec<RowRange>> {
     let mut iter = ranges.into_iter();
     let mut current = iter.next().unwrap();
     for range in iter {
-        if range.start <= current.end + 1 {
-            current.end = current.end.max(range.end);
+        if ranges_touch_or_overlap(&current, &range) {
+            current = merge_pair(current, range);
         } else {
             merged.push(current);
             current = range;
@@ -156,11 +154,17 @@ fn merge_ranges(ranges: Vec<RowRange>) -> Result<Vec<RowRange>> {
 
 fn row_selected(row_idx: usize, ranges: &[RowRange]) -> bool {
     for range in ranges {
-        if row_idx < range.start {
+        let start = range.start.unwrap_or(1);
+        if row_idx < start {
             return false;
         }
-        if row_idx <= range.end {
-            return true;
+        match range.end {
+            Some(end) => {
+                if row_idx <= end {
+                    return true;
+                }
+            }
+            None => return true,
         }
     }
     false
@@ -176,10 +180,46 @@ fn parse_positive_index(text: &str) -> Result<usize> {
     Ok(value)
 }
 
+fn parse_optional_index(text: &str) -> Result<Option<usize>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    parse_positive_index(trimmed).map(Some)
+}
+
+fn ranges_touch_or_overlap(a: &RowRange, b: &RowRange) -> bool {
+    match a.end {
+        None => true,
+        Some(end) => {
+            let next_start = b.start.unwrap_or(1);
+            match end.checked_add(1) {
+                Some(limit) => next_start <= limit,
+                None => true,
+            }
+        }
+    }
+}
+
+fn merge_pair(mut a: RowRange, b: RowRange) -> RowRange {
+    if a.start.is_none() || b.start.is_none() {
+        a.start = None;
+    }
+    match (a.end, b.end) {
+        (None, _) | (_, None) => a.end = None,
+        (Some(left), Some(right)) => {
+            if right > left {
+                a.end = Some(right);
+            }
+        }
+    }
+    a
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct RowRange {
-    start: usize,
-    end: usize,
+    start: Option<usize>,
+    end: Option<usize>,
 }
 
 #[cfg(test)]
@@ -192,9 +232,18 @@ mod tests {
         assert_eq!(
             ranges,
             vec![
-                RowRange { start: 1, end: 1 },
-                RowRange { start: 5, end: 5 },
-                RowRange { start: 10, end: 10 }
+                RowRange {
+                    start: Some(1),
+                    end: Some(1)
+                },
+                RowRange {
+                    start: Some(5),
+                    end: Some(5)
+                },
+                RowRange {
+                    start: Some(10),
+                    end: Some(10)
+                }
             ]
         );
     }
@@ -205,8 +254,14 @@ mod tests {
         assert_eq!(
             ranges,
             vec![
-                RowRange { start: 1, end: 3 },
-                RowRange { start: 10, end: 12 }
+                RowRange {
+                    start: Some(1),
+                    end: Some(3)
+                },
+                RowRange {
+                    start: Some(10),
+                    end: Some(12)
+                }
             ]
         );
     }
@@ -217,9 +272,51 @@ mod tests {
         assert_eq!(
             ranges,
             vec![
-                RowRange { start: 1, end: 5 },
-                RowRange { start: 10, end: 10 }
+                RowRange {
+                    start: Some(1),
+                    end: Some(5)
+                },
+                RowRange {
+                    start: Some(10),
+                    end: Some(10)
+                }
             ]
+        );
+    }
+
+    #[test]
+    fn parse_open_start_range() {
+        let ranges = parse_row_spec(":5").unwrap();
+        assert_eq!(
+            ranges,
+            vec![RowRange {
+                start: None,
+                end: Some(5)
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_open_end_range() {
+        let ranges = parse_row_spec("10:").unwrap();
+        assert_eq!(
+            ranges,
+            vec![RowRange {
+                start: Some(10),
+                end: None
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_full_range() {
+        let ranges = parse_row_spec(":").unwrap();
+        assert_eq!(
+            ranges,
+            vec![RowRange {
+                start: None,
+                end: None
+            }]
         );
     }
 

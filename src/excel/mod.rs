@@ -145,7 +145,7 @@ struct SheetRef {
 
 #[derive(Debug, Clone)]
 struct ColumnToken {
-    start: String,
+    start: Option<String>,
     end: Option<String>,
 }
 
@@ -399,13 +399,13 @@ fn parse_column_tokens(spec: &str) -> Result<Vec<ColumnToken>> {
         }
         if let Some((start, end)) = token.split_once(':') {
             tokens.push(ColumnToken {
-                start: start.trim().to_string(),
-                end: Some(end.trim().to_string()),
+                start: parse_optional_endpoint(start),
+                end: parse_optional_endpoint(end),
             });
         } else {
             tokens.push(ColumnToken {
-                start: token.to_string(),
-                end: None,
+                start: Some(token.to_string()),
+                end: Some(token.to_string()),
             });
         }
     }
@@ -413,6 +413,15 @@ fn parse_column_tokens(spec: &str) -> Result<Vec<ColumnToken>> {
         bail!("column specification must select at least one column");
     }
     Ok(tokens)
+}
+
+fn parse_optional_endpoint(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn parse_row_filter(spec: &str) -> Result<RowFilter> {
@@ -470,22 +479,27 @@ fn resolve_columns(
 ) -> Result<Vec<usize>> {
     let mut indices = BTreeSet::new();
     let sheet_width = max_sheet_width(values);
+    if sheet_width == 0 {
+        bail!("sheet contains no columns to select");
+    }
     for token in tokens {
-        let start = resolve_single_column(&token.start, headers, sheet_width)?;
-        if let Some(end_token) = &token.end {
-            let end = resolve_single_column(end_token, headers, sheet_width)?;
-            if start > end {
-                bail!(
-                    "column range start {} exceeds end {}",
-                    display_column(start),
-                    display_column(end)
-                );
-            }
-            for idx in start..=end {
-                indices.insert(idx);
-            }
-        } else {
-            indices.insert(start);
+        let start = match &token.start {
+            Some(text) => resolve_single_column(text, headers, sheet_width)?,
+            None => 0,
+        };
+        let end = match &token.end {
+            Some(text) => resolve_single_column(text, headers, sheet_width)?,
+            None => sheet_width - 1,
+        };
+        if start > end {
+            bail!(
+                "column range start {} exceeds end {}",
+                display_column(start),
+                display_column(end)
+            );
+        }
+        for idx in start..=end {
+            indices.insert(idx);
         }
     }
     Ok(indices.into_iter().collect())
