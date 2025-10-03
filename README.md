@@ -242,11 +242,12 @@ Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new
   tsvkit excel --sheets reports.xlsx
   ```
 
-- **Preview** the first rows of every sheet (header + N rows). Use `-s` to focus on one sheet, `-n` to change the window, `--formulas` to show Excel formulas instead of values, and `--dates raw|excel|iso` to control date rendering (`iso` is the default):
+- **Preview** the first rows of every sheet (header + N rows). Use `-s` to focus on one sheet, `-n` to change the window, `--formulas` to show Excel formulas instead of values, `--dates raw|excel|iso` to control date rendering (`iso` is the default), and `--pretty` to render the preview with aligned borders:
 
   ```bash
   tsvkit excel --preview reports.xlsx -n 5 -s Summary
   tsvkit excel --preview reports.xlsx --formulas --dates raw
+  tsvkit excel --preview reports.xlsx --pretty
   ```
 
 - **Dump** a sheet (or subset) to TSV. Columns accept names, indices, or Excel letters/ranges (e.g. `A:C,Expr`). Rows accept 1-based indices or inclusive ranges (`1,10:20,100:`). `--na` replaces blanks, `--escape-*` makes TSV-safe output, and the same `--values/--formulas` + `--dates` controls apply:
