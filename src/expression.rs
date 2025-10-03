@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 
-use crate::common::{ColumnSelector, resolve_selectors};
+use crate::common::{ColumnSelector, parse_selector_list, resolve_selectors};
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -18,6 +18,7 @@ pub enum Expr {
 #[derive(Debug, Clone)]
 pub enum ValueExpr {
     Column(ColumnSelector),
+    Columns(Vec<ColumnSelector>),
     String(String),
     Number(f64),
     Unary(UnaryOp, Box<ValueExpr>),
@@ -82,6 +83,7 @@ pub enum CompareOp {
 #[derive(Debug, Clone)]
 enum Token {
     Column(ColumnSelector),
+    Columns(Vec<ColumnSelector>),
     String(String),
     Number(f64),
     Ident(String),
@@ -191,6 +193,7 @@ impl RowAccessor for Vec<String> {
 #[derive(Debug, Clone)]
 pub enum BoundValue {
     Column(usize),
+    Columns(Vec<usize>),
     String(String),
     Number(f64),
     Unary(UnaryOp, Box<BoundValue>),
@@ -251,6 +254,27 @@ where
             EvalValue {
                 text: Cow::Borrowed(text),
                 numeric: parse_float(text),
+            }
+        }
+        BoundValue::Columns(indices) => {
+            if indices.is_empty() {
+                return empty_eval();
+            }
+            let mut combined = String::new();
+            let mut numeric = None;
+            for (pos, idx) in indices.iter().enumerate() {
+                let text = row.get(*idx).unwrap_or("");
+                if pos > 0 {
+                    combined.push('\t');
+                }
+                combined.push_str(text);
+                if numeric.is_none() {
+                    numeric = parse_float(text);
+                }
+            }
+            EvalValue {
+                text: Cow::Owned(combined),
+                numeric,
             }
         }
         BoundValue::String(text) => EvalValue {
@@ -320,11 +344,20 @@ pub fn evaluate_truthy<R>(value: &BoundValue, row: &R) -> bool
 where
     R: RowAccessor + ?Sized,
 {
-    let eval = eval_value(value, row);
-    if let Some(number) = eval.numeric {
-        number != 0.0
-    } else {
-        !eval.text.trim().is_empty()
+    match value {
+        BoundValue::Columns(indices) => indices.iter().any(|idx| {
+            row.get(*idx)
+                .map(|text| !text.trim().is_empty())
+                .unwrap_or(false)
+        }),
+        _ => {
+            let eval = eval_value(value, row);
+            if let Some(number) = eval.numeric {
+                number != 0.0
+            } else {
+                !eval.text.trim().is_empty()
+            }
+        }
     }
 }
 
@@ -350,17 +383,34 @@ fn evaluate_regex<R>(value: &BoundValue, pattern: &RegexPattern, invert: bool, r
 where
     R: RowAccessor + ?Sized,
 {
-    let hay = eval_value(value, row);
-    let haystack = hay.text.as_ref();
     let is_match = match pattern {
-        RegexPattern::Static(regex) => regex.is_match(haystack),
+        RegexPattern::Static(regex) => match value {
+            BoundValue::Column(idx) => regex.is_match(row.get(*idx).unwrap_or("")),
+            BoundValue::Columns(indices) => indices
+                .iter()
+                .any(|idx| regex.is_match(row.get(*idx).unwrap_or(""))),
+            _ => {
+                let hay = eval_value(value, row);
+                regex.is_match(hay.text.as_ref())
+            }
+        },
         RegexPattern::Dynamic(bound) => {
             let pat_eval = eval_value(bound, row);
             let pattern_text = pat_eval.text.as_ref();
-            Regex::new(pattern_text)
-                .ok()
-                .map(|re| re.is_match(haystack))
-                .unwrap_or(false)
+            if let Ok(regex) = Regex::new(pattern_text) {
+                match value {
+                    BoundValue::Column(idx) => regex.is_match(row.get(*idx).unwrap_or("")),
+                    BoundValue::Columns(indices) => indices
+                        .iter()
+                        .any(|idx| regex.is_match(row.get(*idx).unwrap_or(""))),
+                    _ => {
+                        let hay = eval_value(value, row);
+                        regex.is_match(hay.text.as_ref())
+                    }
+                }
+            } else {
+                false
+            }
         }
     };
     if invert { !is_match } else { is_match }
@@ -370,8 +420,29 @@ fn bind_value(value: ValueExpr, headers: &[String], no_header: bool) -> Result<B
     match value {
         ValueExpr::Column(selector) => {
             let indices = resolve_selectors(headers, &[selector], no_header)?;
-            let index = *indices.first().expect("single column");
-            Ok(BoundValue::Column(index))
+            if indices.is_empty() {
+                bail!("column selector resolved to no columns");
+            }
+            if indices.len() == 1 {
+                Ok(BoundValue::Column(indices[0]))
+            } else {
+                Ok(BoundValue::Columns(indices))
+            }
+        }
+        ValueExpr::Columns(selectors) => {
+            let mut indices = Vec::new();
+            for selector in selectors {
+                let mut resolved = resolve_selectors(headers, &[selector], no_header)?;
+                indices.append(&mut resolved);
+            }
+            if indices.is_empty() {
+                bail!("column selector resolved to no columns");
+            }
+            if indices.len() == 1 {
+                Ok(BoundValue::Column(indices[0]))
+            } else {
+                Ok(BoundValue::Columns(indices))
+            }
         }
         ValueExpr::String(text) => Ok(BoundValue::String(text)),
         ValueExpr::Number(number) => Ok(BoundValue::Number(number)),
@@ -460,6 +531,57 @@ fn format_number(value: f64) -> String {
 struct Lexer<'a> {
     chars: &'a [u8],
     pos: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regex_matches_any_in_range() {
+        let mut lexer = Lexer::new("$a:$c ~ \"RNA\"");
+        match lexer.next_token().unwrap().unwrap() {
+            Token::Columns(ref cols) => {
+                assert_eq!(cols.len(), 1);
+            }
+            other => panic!("expected column token, got {:?}", other),
+        }
+        let expr = parse_expression("$a:$c ~ \"RNA\"").unwrap();
+        let headers = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec!["foo".to_string(), "bar".to_string(), "sRNA".to_string()];
+        assert!(evaluate(&bound, &row));
+        let row = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];
+        assert!(!evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn regex_matches_all_columns_when_omitted() {
+        let expr = parse_expression("~ \"RNA\"").unwrap();
+        let headers = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec!["foo".to_string(), "pre-RNA".to_string(), "baz".to_string()];
+        assert!(evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn regex_matches_mixed_selector_list() {
+        let expr = parse_expression("$a,$c: ~ \"RNA\"").unwrap();
+        let headers = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec![
+            "foo".to_string(),
+            "bar".to_string(),
+            "baz".to_string(),
+            "mRNA".to_string(),
+        ];
+        assert!(evaluate(&bound, &row));
+    }
 }
 
 impl<'a> Lexer<'a> {
@@ -572,9 +694,24 @@ impl<'a> Lexer<'a> {
         self.pos += 1;
         let start = self.pos;
         let mut is_numeric = true;
+        let mut has_range_syntax = false;
         while self.pos < self.chars.len() {
             let c = self.chars[self.pos];
-            if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.') {
+            if c == b'$' {
+                self.pos += 1;
+                continue;
+            }
+            if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b',' | b':') {
+                if c == b',' || c == b':' {
+                    has_range_syntax = true;
+                    is_numeric = false;
+                } else if !c.is_ascii_digit() {
+                    is_numeric = false;
+                }
+                if c == b',' || c == b':' {
+                    self.pos += 1;
+                    continue;
+                }
                 if !c.is_ascii_digit() {
                     is_numeric = false;
                 }
@@ -594,7 +731,17 @@ impl<'a> Lexer<'a> {
         if start == self.pos {
             bail!("column reference requires a name or index after '$'");
         }
-        let text = std::str::from_utf8(&self.chars[start..self.pos]).unwrap();
+        let raw = std::str::from_utf8(&self.chars[start..self.pos]).unwrap();
+        let cleaned = raw.replace('$', "");
+        let text = cleaned.trim();
+        if has_range_syntax || text.contains(',') {
+            let selectors = parse_selector_list(text)
+                .with_context(|| format!("invalid column selector '{}'", text))?;
+            if selectors.is_empty() {
+                bail!("column selector list must not be empty");
+            }
+            return Ok(Some(Token::Columns(selectors)));
+        }
         if let Ok(idx) = text.parse::<usize>() {
             if idx == 0 {
                 bail!("column indices use 1-based positions");
@@ -728,6 +875,13 @@ impl Parser {
             self.pos += 1;
             let inner = self.parse_not()?;
             Ok(Expr::Not(Box::new(inner)))
+        } else if matches!(
+            self.peek_token(),
+            Some(Token::Compare(
+                CompareOp::RegexMatch | CompareOp::RegexNotMatch
+            ))
+        ) {
+            self.parse_regex_without_left()
         } else if self.match_token(TokenKind::LParen) {
             self.pos += 1;
             let expr = self.parse_expr()?;
@@ -738,6 +892,15 @@ impl Parser {
         } else {
             self.parse_comparison()
         }
+    }
+
+    fn parse_regex_without_left(&mut self) -> Result<Expr> {
+        let op = self
+            .consume_compare()
+            .expect("regex operator should be present");
+        let right = self.parse_arith()?;
+        let left = ValueExpr::Column(ColumnSelector::Range(None, None));
+        Ok(Expr::Compare(left, op, right))
     }
 
     fn parse_comparison(&mut self) -> Result<Expr> {
@@ -759,7 +922,10 @@ impl Parser {
             for (lhs, op, rhs) in iter {
                 let left_side = if matches!(
                     lhs,
-                    ValueExpr::Column(_) | ValueExpr::String(_) | ValueExpr::Number(_)
+                    ValueExpr::Column(_)
+                        | ValueExpr::Columns(_)
+                        | ValueExpr::String(_)
+                        | ValueExpr::Number(_)
                 ) {
                     lhs
                 } else {
@@ -825,6 +991,13 @@ impl Parser {
             Some(Token::Column(_)) => {
                 if let Some(Token::Column(selector)) = self.advance().cloned() {
                     Ok(ValueExpr::Column(selector))
+                } else {
+                    unreachable!()
+                }
+            }
+            Some(Token::Columns(_)) => {
+                if let Some(Token::Columns(selectors)) = self.advance().cloned() {
+                    Ok(ValueExpr::Columns(selectors))
                 } else {
                     unreachable!()
                 }

@@ -11,7 +11,7 @@ use xz2::read::XzDecoder;
 pub enum ColumnSelector {
     Index(usize),
     Name(String),
-    Range(Box<ColumnSelector>, Box<ColumnSelector>),
+    Range(Option<Box<ColumnSelector>>, Option<Box<ColumnSelector>>),
 }
 
 pub fn parse_selector_list(spec: &str) -> Result<Vec<ColumnSelector>> {
@@ -89,8 +89,19 @@ pub fn resolve_selectors(
                 indices.push(index);
             }
             ColumnSelector::Range(start, end) => {
-                let start_idx = resolve_selector_index(headers, start, no_header)?;
-                let end_idx = resolve_selector_index(headers, end, no_header)?;
+                if headers.is_empty() {
+                    bail!("column range cannot be resolved without any columns");
+                }
+                let start_idx = match start {
+                    Some(sel) => resolve_selector_index(headers, sel, no_header)?,
+                    None => 0,
+                };
+                let end_idx = match end {
+                    Some(sel) => resolve_selector_index(headers, sel, no_header)?,
+                    None => headers.len().checked_sub(1).ok_or_else(|| {
+                        anyhow!("column range end cannot be determined in empty header")
+                    })?,
+                };
                 if start_idx > end_idx {
                     bail!("column range start comes after end");
                 }
@@ -207,12 +218,19 @@ fn parse_selector_token(token: &str) -> Result<ColumnSelector> {
         if extra {
             bail!("invalid column range '{}': too many ':' characters", token);
         }
-        let start_selector = parse_simple_selector(start.trim())?;
-        let end_selector = parse_simple_selector(end.trim())?;
-        return Ok(ColumnSelector::Range(
-            Box::new(start_selector),
-            Box::new(end_selector),
-        ));
+        let start_trim = start.trim();
+        let end_trim = end.trim();
+        let start_selector = if start_trim.is_empty() {
+            None
+        } else {
+            Some(Box::new(parse_simple_selector(start_trim)?))
+        };
+        let end_selector = if end_trim.is_empty() {
+            None
+        } else {
+            Some(Box::new(parse_simple_selector(end_trim)?))
+        };
+        return Ok(ColumnSelector::Range(start_selector, end_selector));
     }
 
     parse_simple_selector(token)
@@ -294,6 +312,30 @@ mod tests {
     fn resolves_index_range() {
         let headers = vec!["col1".to_string(), "col2".to_string(), "col3".to_string()];
         let selectors = parse_selector_list("1:3").unwrap();
+        let indices = resolve_selectors(&headers, &selectors, false).unwrap();
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn resolves_open_range_start() {
+        let headers = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let selectors = parse_selector_list(":b").unwrap();
+        let indices = resolve_selectors(&headers, &selectors, false).unwrap();
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn resolves_open_range_end() {
+        let headers = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let selectors = parse_selector_list("b:").unwrap();
+        let indices = resolve_selectors(&headers, &selectors, false).unwrap();
+        assert_eq!(indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn resolves_full_range() {
+        let headers = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let selectors = parse_selector_list(":").unwrap();
         let indices = resolve_selectors(&headers, &selectors, false).unwrap();
         assert_eq!(indices, vec![0, 1, 2]);
     }
