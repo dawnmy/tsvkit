@@ -1,8 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use indexmap::IndexMap;
 
@@ -62,15 +64,27 @@ enum StatOp {
     Sum,
     Mean,
     Median,
+    TrimMean,
+    Iqr,
     First,
     Last,
     Count,
+    Rand,
+    UniqueValues,
+    Collapse,
+    CountUnique(&'static str),
     Sd,
     Var,
     Min,
     Max,
+    AbsMin,
+    AbsMax,
     Mode,
-    Distinct,
+    AntiMode,
+    Prod,
+    Entropy,
+    ArgMin,
+    ArgMax,
     Quantile(QuantileSpec),
 }
 
@@ -84,17 +98,30 @@ impl StatOp {
             "sum" => Ok(StatOp::Sum),
             "mean" | "avg" => Ok(StatOp::Mean),
             "median" | "med" => Ok(StatOp::Median),
+            "trimmean" => Ok(StatOp::TrimMean),
+            "iqr" => Ok(StatOp::Iqr),
             "first" => Ok(StatOp::First),
             "last" => Ok(StatOp::Last),
             "count" => Ok(StatOp::Count),
+            "rand" | "random" => Ok(StatOp::Rand),
+            "unique" => Ok(StatOp::UniqueValues),
+            "collapse" => Ok(StatOp::Collapse),
+            "countunique" => Ok(StatOp::CountUnique("countunique")),
+            "distinct" => Ok(StatOp::CountUnique("distinct")),
             "sd" | "std" | "stddev" => Ok(StatOp::Sd),
             "var" | "variance" => Ok(StatOp::Var),
             "min" => Ok(StatOp::Min),
             "max" => Ok(StatOp::Max),
+            "absmin" => Ok(StatOp::AbsMin),
+            "absmax" => Ok(StatOp::AbsMax),
             "mode" => Ok(StatOp::Mode),
-            "distinct" | "unique" => Ok(StatOp::Distinct),
+            "antimode" => Ok(StatOp::AntiMode),
+            "prod" | "product" => Ok(StatOp::Prod),
+            "entropy" => Ok(StatOp::Entropy),
+            "argmin" => Ok(StatOp::ArgMin),
+            "argmax" => Ok(StatOp::ArgMax),
             other => bail!(
-                "unsupported stat '{}': sum, mean, median, first, last, count, sd, var, min, max, mode, distinct, quantiles",
+                "unsupported stat '{}': sum, mean, median, trimmean, iqr, first, last, count, rand, unique, collapse, countunique, sd, var, min, max, absmin, absmax, mode, antimode, prod, entropy, argmin, argmax, quantiles",
                 other
             ),
         }
@@ -105,15 +132,27 @@ impl StatOp {
             StatOp::Sum => "sum",
             StatOp::Mean => "mean",
             StatOp::Median => "median",
+            StatOp::TrimMean => "trimmean",
+            StatOp::Iqr => "iqr",
             StatOp::First => "first",
             StatOp::Last => "last",
             StatOp::Count => "count",
+            StatOp::Rand => "rand",
+            StatOp::UniqueValues => "unique",
+            StatOp::Collapse => "collapse",
+            StatOp::CountUnique(label) => label,
             StatOp::Sd => "sd",
             StatOp::Var => "var",
             StatOp::Min => "min",
             StatOp::Max => "max",
+            StatOp::AbsMin => "absmin",
+            StatOp::AbsMax => "absmax",
             StatOp::Mode => "mode",
-            StatOp::Distinct => "distinct",
+            StatOp::AntiMode => "antimode",
+            StatOp::Prod => "prod",
+            StatOp::Entropy => "entropy",
+            StatOp::ArgMin => "argmin",
+            StatOp::ArgMax => "argmax",
             StatOp::Quantile(spec) => spec.label.as_str(),
         }
     }
@@ -197,11 +236,15 @@ struct ColumnAggState {
     needs_last: bool,
     needs_numeric: bool,
     needs_variance: bool,
-    needs_median: bool,
-    needs_quantiles: bool,
+    needs_sorted_values: bool,
     needs_minmax: bool,
-    needs_mode: bool,
+    needs_value_counts: bool,
     needs_distinct: bool,
+    needs_abs_extrema: bool,
+    needs_product: bool,
+    needs_all_values: bool,
+    needs_argmin: bool,
+    needs_argmax: bool,
     first: Option<String>,
     last: Option<String>,
     count: usize,
@@ -211,8 +254,17 @@ struct ColumnAggState {
     values: Vec<f64>,
     min: Option<f64>,
     max: Option<f64>,
-    mode_counts: IndexMap<String, usize>,
+    abs_min: Option<(f64, f64)>,
+    abs_max: Option<(f64, f64)>,
+    product: f64,
+    has_product: bool,
+    argmin_value: Option<f64>,
+    argmin_position: Option<usize>,
+    argmax_value: Option<f64>,
+    argmax_position: Option<usize>,
+    value_counts: IndexMap<String, usize>,
     distinct_values: HashSet<String>,
+    all_values: Vec<String>,
 }
 
 impl ColumnAggState {
@@ -225,30 +277,59 @@ impl ColumnAggState {
                 StatOp::Sum
                     | StatOp::Mean
                     | StatOp::Median
+                    | StatOp::TrimMean
+                    | StatOp::Iqr
                     | StatOp::Var
                     | StatOp::Sd
                     | StatOp::Min
                     | StatOp::Max
+                    | StatOp::AbsMin
+                    | StatOp::AbsMax
                     | StatOp::Quantile(_)
+                    | StatOp::Prod
+                    | StatOp::ArgMin
+                    | StatOp::ArgMax
             )
         });
         let needs_variance = ops.iter().any(|op| matches!(op, StatOp::Sd | StatOp::Var));
-        let needs_median = ops.iter().any(|op| matches!(op, StatOp::Median));
-        let needs_quantiles = ops.iter().any(|op| matches!(op, StatOp::Quantile(_)));
+        let needs_sorted_values = ops.iter().any(|op| {
+            matches!(
+                op,
+                StatOp::Median | StatOp::Quantile(_) | StatOp::TrimMean | StatOp::Iqr
+            )
+        });
         let needs_minmax = ops.iter().any(|op| matches!(op, StatOp::Min | StatOp::Max));
-        let needs_mode = ops.iter().any(|op| matches!(op, StatOp::Mode));
-        let needs_distinct = ops.iter().any(|op| matches!(op, StatOp::Distinct));
+        let needs_value_counts = ops.iter().any(|op| {
+            matches!(
+                op,
+                StatOp::Mode | StatOp::AntiMode | StatOp::Entropy | StatOp::UniqueValues
+            )
+        });
+        let needs_distinct = ops.iter().any(|op| matches!(op, StatOp::CountUnique(_)));
+        let needs_abs_extrema = ops
+            .iter()
+            .any(|op| matches!(op, StatOp::AbsMin | StatOp::AbsMax));
+        let needs_product = ops.iter().any(|op| matches!(op, StatOp::Prod));
+        let needs_all_values = ops
+            .iter()
+            .any(|op| matches!(op, StatOp::Collapse | StatOp::Rand));
+        let needs_argmin = ops.iter().any(|op| matches!(op, StatOp::ArgMin));
+        let needs_argmax = ops.iter().any(|op| matches!(op, StatOp::ArgMax));
         ColumnAggState {
             ops,
             needs_first,
             needs_last,
             needs_numeric,
             needs_variance,
-            needs_median,
-            needs_quantiles,
+            needs_sorted_values,
             needs_minmax,
-            needs_mode,
+            needs_value_counts,
             needs_distinct,
+            needs_abs_extrema,
+            needs_product,
+            needs_all_values,
+            needs_argmin,
+            needs_argmax,
             first: None,
             last: None,
             count: 0,
@@ -258,8 +339,17 @@ impl ColumnAggState {
             values: Vec::new(),
             min: None,
             max: None,
-            mode_counts: IndexMap::new(),
+            abs_min: None,
+            abs_max: None,
+            product: 1.0,
+            has_product: false,
+            argmin_value: None,
+            argmin_position: None,
+            argmax_value: None,
+            argmax_position: None,
+            value_counts: IndexMap::new(),
             distinct_values: HashSet::new(),
+            all_values: Vec::new(),
         }
     }
 
@@ -272,8 +362,12 @@ impl ColumnAggState {
         }
         self.count += 1;
 
-        if self.needs_mode {
-            let entry = self.mode_counts.entry(value.to_string()).or_insert(0);
+        if self.needs_all_values {
+            self.all_values.push(value.to_string());
+        }
+
+        if self.needs_value_counts {
+            let entry = self.value_counts.entry(value.to_string()).or_insert(0);
             *entry += 1;
         }
         if self.needs_distinct {
@@ -284,23 +378,80 @@ impl ColumnAggState {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
                 if let Ok(number) = trimmed.parse::<f64>() {
-                    self.numeric_count += 1;
-                    self.sum += number;
-                    if self.needs_variance {
-                        self.sum_sq += number * number;
-                    }
-                    if self.needs_median || self.needs_quantiles {
-                        self.values.push(number);
-                    }
-                    if self.needs_minmax {
-                        self.min = Some(match self.min {
-                            Some(current) => current.min(number),
-                            None => number,
-                        });
-                        self.max = Some(match self.max {
-                            Some(current) => current.max(number),
-                            None => number,
-                        });
+                    if number.is_finite() {
+                        self.numeric_count += 1;
+                        self.sum += number;
+                        if self.needs_variance {
+                            self.sum_sq += number * number;
+                        }
+                        if self.needs_sorted_values {
+                            self.values.push(number);
+                        }
+                        if self.needs_minmax {
+                            self.min = Some(match self.min {
+                                Some(current) => current.min(number),
+                                None => number,
+                            });
+                            self.max = Some(match self.max {
+                                Some(current) => current.max(number),
+                                None => number,
+                            });
+                        }
+                        if self.needs_abs_extrema {
+                            let abs_value = number.abs();
+                            if let Some((_, current_abs)) = self.abs_min {
+                                if abs_value < current_abs {
+                                    self.abs_min = Some((number, abs_value));
+                                }
+                            } else {
+                                self.abs_min = Some((number, abs_value));
+                            }
+                            if let Some((_, current_abs)) = self.abs_max {
+                                if abs_value > current_abs {
+                                    self.abs_max = Some((number, abs_value));
+                                }
+                            } else {
+                                self.abs_max = Some((number, abs_value));
+                            }
+                        }
+                        if self.needs_product {
+                            if self.has_product {
+                                self.product *= number;
+                            } else {
+                                self.product = number;
+                                self.has_product = true;
+                            }
+                        }
+                        if self.needs_argmin {
+                            let pos = self.numeric_count;
+                            match self.argmin_value {
+                                Some(current) => {
+                                    if number < current {
+                                        self.argmin_value = Some(number);
+                                        self.argmin_position = Some(pos);
+                                    }
+                                }
+                                None => {
+                                    self.argmin_value = Some(number);
+                                    self.argmin_position = Some(pos);
+                                }
+                            }
+                        }
+                        if self.needs_argmax {
+                            let pos = self.numeric_count;
+                            match self.argmax_value {
+                                Some(current) => {
+                                    if number > current {
+                                        self.argmax_value = Some(number);
+                                        self.argmax_position = Some(pos);
+                                    }
+                                }
+                                None => {
+                                    self.argmax_value = Some(number);
+                                    self.argmax_position = Some(pos);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -308,7 +459,7 @@ impl ColumnAggState {
     }
 
     fn finalize(&mut self) -> Vec<String> {
-        if (self.needs_median || self.needs_quantiles) && !self.values.is_empty() {
+        if self.needs_sorted_values && !self.values.is_empty() {
             self.values
                 .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         }
@@ -333,6 +484,20 @@ impl ColumnAggState {
                 StatOp::Median => {
                     results.push(median(&self.values).map(format_number).unwrap_or_default());
                 }
+                StatOp::TrimMean => {
+                    results.push(
+                        trimmed_mean(&self.values)
+                            .map(format_number)
+                            .unwrap_or_default(),
+                    );
+                }
+                StatOp::Iqr => {
+                    results.push(
+                        interquartile_range(&self.values)
+                            .map(format_number)
+                            .unwrap_or_default(),
+                    );
+                }
                 StatOp::First => {
                     results.push(self.first.clone().unwrap_or_default());
                 }
@@ -341,6 +506,37 @@ impl ColumnAggState {
                 }
                 StatOp::Count => {
                     results.push(self.count.to_string());
+                }
+                StatOp::Rand => {
+                    if let Some(choice) = random_choice(&self.all_values) {
+                        results.push(choice);
+                    } else {
+                        results.push(String::new());
+                    }
+                }
+                StatOp::UniqueValues => {
+                    if self.value_counts.is_empty() {
+                        results.push(String::new());
+                    } else {
+                        let unique: Vec<&String> = self.value_counts.keys().collect();
+                        results.push(
+                            unique
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+                    }
+                }
+                StatOp::Collapse => {
+                    if self.all_values.is_empty() {
+                        results.push(String::new());
+                    } else {
+                        results.push(self.all_values.join(","));
+                    }
+                }
+                StatOp::CountUnique(_) => {
+                    results.push(self.distinct_values.len().to_string());
                 }
                 StatOp::Sd => {
                     results.push(
@@ -362,19 +558,53 @@ impl ColumnAggState {
                 StatOp::Max => {
                     results.push(self.max.map(format_number).unwrap_or_default());
                 }
-                StatOp::Mode => {
-                    let mut best_value = String::new();
-                    let mut best_count = 0usize;
-                    for (value, count) in &self.mode_counts {
-                        if *count > best_count {
-                            best_count = *count;
-                            best_value = value.clone();
-                        }
-                    }
-                    results.push(best_value);
+                StatOp::AbsMin => {
+                    results.push(
+                        self.abs_min
+                            .map(|(value, _)| format_number(value))
+                            .unwrap_or_default(),
+                    );
                 }
-                StatOp::Distinct => {
-                    results.push(self.distinct_values.len().to_string());
+                StatOp::AbsMax => {
+                    results.push(
+                        self.abs_max
+                            .map(|(value, _)| format_number(value))
+                            .unwrap_or_default(),
+                    );
+                }
+                StatOp::Mode => {
+                    results.push(mode_value(&self.value_counts));
+                }
+                StatOp::AntiMode => {
+                    results.push(antimode_value(&self.value_counts));
+                }
+                StatOp::Prod => {
+                    if self.has_product {
+                        results.push(format_number(self.product));
+                    } else {
+                        results.push(String::new());
+                    }
+                }
+                StatOp::Entropy => {
+                    results.push(
+                        entropy(&self.value_counts, self.count)
+                            .map(format_number)
+                            .unwrap_or_default(),
+                    );
+                }
+                StatOp::ArgMin => {
+                    results.push(
+                        self.argmin_position
+                            .map(|pos| pos.to_string())
+                            .unwrap_or_default(),
+                    );
+                }
+                StatOp::ArgMax => {
+                    results.push(
+                        self.argmax_position
+                            .map(|pos| pos.to_string())
+                            .unwrap_or_default(),
+                    );
                 }
                 StatOp::Quantile(spec) => {
                     results.push(
@@ -499,10 +729,22 @@ fn expand_target_columns(spec: &str, headers: &[String], no_header: bool) -> Res
             let resolved = resolve_selectors(headers, &selectors, no_header)?;
             indices.extend(resolved);
         } else if parts.len() == 2 {
-            let start_selector = parse_single_selector(parts[0].trim())?;
-            let end_selector = parse_single_selector(parts[1].trim())?;
-            let start_idx = resolve_single_selector(headers, start_selector, no_header)?;
-            let end_idx = resolve_single_selector(headers, end_selector, no_header)?;
+            let start_part = parts[0].trim();
+            let end_part = parts[1].trim();
+            let start_idx = if start_part.is_empty() {
+                0
+            } else {
+                let start_selector = parse_single_selector(start_part)?;
+                resolve_single_selector(headers, start_selector, no_header)?
+            };
+            let end_idx = if end_part.is_empty() {
+                headers.len().checked_sub(1).ok_or_else(|| {
+                    anyhow!("column range end cannot be determined in empty table")
+                })?
+            } else {
+                let end_selector = parse_single_selector(end_part)?;
+                resolve_single_selector(headers, end_selector, no_header)?
+            };
             if start_idx <= end_idx {
                 for idx in start_idx..=end_idx {
                     indices.push(idx);
@@ -691,9 +933,102 @@ fn quantile(values: &[f64], fraction: f64) -> Option<f64> {
     }
 }
 
+fn trimmed_mean(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let n = values.len();
+    let trim_fraction = 0.1;
+    let trim = ((n as f64) * trim_fraction).floor() as usize;
+    if trim == 0 {
+        let sum: f64 = values.iter().sum();
+        return Some(sum / n as f64);
+    }
+    if trim * 2 >= n {
+        let sum: f64 = values.iter().sum();
+        return Some(sum / n as f64);
+    }
+    let slice = &values[trim..(n - trim)];
+    if slice.is_empty() {
+        return None;
+    }
+    let sum: f64 = slice.iter().sum();
+    Some(sum / slice.len() as f64)
+}
+
+fn interquartile_range(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let q1 = quantile(values, 0.25)?;
+    let q3 = quantile(values, 0.75)?;
+    Some(q3 - q1)
+}
+
+fn random_choice(values: &[String]) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut hasher = DefaultHasher::new();
+    values.len().hash(&mut hasher);
+    for (idx, value) in values.iter().enumerate() {
+        idx.hash(&mut hasher);
+        value.hash(&mut hasher);
+    }
+    if let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        duration.as_nanos().hash(&mut hasher);
+    }
+    let index = (hasher.finish() as usize) % values.len();
+    values.get(index).cloned()
+}
+
+fn mode_value(counts: &IndexMap<String, usize>) -> String {
+    let mut best_value = String::new();
+    let mut best_count = 0usize;
+    for (value, count) in counts {
+        if *count > best_count {
+            best_count = *count;
+            best_value = value.clone();
+        }
+    }
+    best_value
+}
+
+fn antimode_value(counts: &IndexMap<String, usize>) -> String {
+    if counts.is_empty() {
+        return String::new();
+    }
+    let mut best_value = String::new();
+    let mut best_count = usize::MAX;
+    for (value, count) in counts {
+        if *count < best_count {
+            best_count = *count;
+            best_value = value.clone();
+        }
+    }
+    best_value
+}
+
+fn entropy(counts: &IndexMap<String, usize>, total: usize) -> Option<f64> {
+    if total == 0 || counts.is_empty() {
+        return None;
+    }
+    let total = total as f64;
+    let mut entropy = 0.0;
+    for &count in counts.values() {
+        if count == 0 {
+            continue;
+        }
+        let probability = count as f64 / total;
+        entropy -= probability * probability.log2();
+    }
+    Some(entropy.max(0.0))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_quantile_spec;
+    use super::{entropy, expand_target_columns, parse_quantile_spec, trimmed_mean};
+    use indexmap::IndexMap;
 
     #[test]
     fn quantile_aliases_map_to_expected_fractions() {
@@ -719,5 +1054,35 @@ mod tests {
     #[test]
     fn out_of_range_quantiles_reject() {
         assert!(parse_quantile_spec("q250").is_none());
+    }
+
+    #[test]
+    fn expand_target_columns_supports_open_ranges() {
+        let headers = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let end_open = expand_target_columns("2:", &headers, false).unwrap();
+        assert_eq!(end_open, vec![1, 2, 3]);
+        let start_open = expand_target_columns(":3", &headers, false).unwrap();
+        assert_eq!(start_open, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn trimmed_mean_trims_extremes() {
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let tm = trimmed_mean(&values).unwrap();
+        assert!((tm - 5.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn entropy_matches_uniform_distribution() {
+        let mut counts = IndexMap::new();
+        counts.insert("a".to_string(), 2);
+        counts.insert("b".to_string(), 2);
+        let ent = entropy(&counts, 4).unwrap();
+        assert!((ent - 1.0).abs() < 1e-6);
     }
 }
