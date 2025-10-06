@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::env;
+use std::io;
 
 mod common;
 mod csv;
@@ -8,6 +9,7 @@ mod cut;
 mod excel;
 mod expression;
 mod filter;
+mod info;
 mod join;
 mod melt;
 mod mutate;
@@ -56,12 +58,14 @@ enum Commands {
     Excel(excel::ExcelArgs),
     /// CSV utilities (convert to TSV)
     Csv(csv::CsvArgs),
+    /// Inspect TSV schema, column types, and previews
+    Info(info::InfoArgs),
 }
 
 fn main() -> Result<()> {
     let raw_args: Vec<_> = env::args_os().collect();
     let cli = Cli::parse_from(raw_args.clone());
-    match cli.command {
+    let result = match cli.command {
         Commands::Join(args) => join::run(args),
         Commands::Summarize(args) => summarize::run(args),
         Commands::Cut(args) => cut::run(args),
@@ -74,5 +78,24 @@ fn main() -> Result<()> {
         Commands::Slice(args) => slice::run(args),
         Commands::Excel(args) => excel::run(args, &raw_args),
         Commands::Csv(args) => csv::run(args),
+        Commands::Info(args) => info::run(args),
+    };
+
+    if let Err(err) = &result {
+        if is_broken_pipe(err) {
+            return Ok(());
+        }
     }
+
+    result
+}
+
+fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        if let Some(io_err) = cause.downcast_ref::<io::Error>() {
+            io_err.kind() == io::ErrorKind::BrokenPipe
+        } else {
+            false
+        }
+    })
 }

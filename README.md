@@ -80,6 +80,7 @@ The same pipeline works if the cytokine table is compressed (`examples/cytokines
 
 The table below lists every `tsvkit` subcommand and a one-line purpose summary; each item links to the detailed section later in this guide.
 
+- [`info`](#info) — inspect table shape, inferred column types, and sample values.
 - [`cut`](#cut) — select or reorder columns via names, indices, or ranges.
 - [`filter`](#filter) — keep rows matching an expression (math, logic, regex, functions).
 - [`join`](#join) — join multiple TSVs on key columns with parallel loading and fill values.
@@ -144,6 +145,29 @@ Aggregators support descriptive statistics in `summarize` and row-wise calculati
 ## Command Reference
 
 Each subsection highlights the core options, shows realistic invocations, and calls out relevant selectors or expressions.
+
+### `info`
+
+Get a quick, structured summary of any TSV: the overall shape plus one row per column with inferred types and sample values. The preview column defaults to the first three rows, but you can raise or lower it with `-n` (e.g. `-n 5`). Combine with `-H` when the input has no header row so the summary omits the name column.
+
+```bash
+tsvkit info examples/samples.tsv
+```
+
+_Output_
+```
+#shape(6, 9)
+index   name            type    first3
+1       sample_id       str     [S01, S02, S03]
+2       subject_id      str     [P001, P002, P001]
+3       group           str     [case, control, case]
+4       timepoint       str     [baseline, baseline, week4]
+5       purity          num     [0.94, 0.90, 0.96]
+6       dna_ug          num     [25.3, 22.8, 27.4]
+7       rna_ug          num     [18.1, 17.5, 19.8]
+8       contamination_pct       num     [0.02, 0.03, 0.01]
+9       tech            str     [sRNA-seq, sRNA-seq, sRNA-seq]
+```
 
 ### `cut`
 
