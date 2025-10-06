@@ -98,16 +98,20 @@ pub fn run(args: FilterArgs) -> Result<()> {
             .collect::<Vec<_>>();
         let bound = bind_expression(expr_ast, &headers, false)?;
         let expected_width = headers.len();
-
-        if !headers.is_empty() {
-            writeln!(writer, "{}", headers.join("\t"))?;
-        }
+        let header_line = (!headers.is_empty()).then(|| headers.join("\t"));
+        let mut header_written = false;
         for record in reader.records() {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
             if should_skip_record(&record, &input_opts, Some(expected_width)) {
                 continue;
             }
             if evaluate(&bound, &record) {
+                if !header_written {
+                    if let Some(line) = header_line.as_ref() {
+                        writeln!(writer, "{}", line)?;
+                    }
+                    header_written = true;
+                }
                 emit_record(&record, &mut writer)?;
             }
         }
