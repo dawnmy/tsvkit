@@ -1,6 +1,6 @@
 # tsvkit
 
-`tsvkit` is a fast, ergonomic toolkit for working with TSV tables. Written in Rust, it brings familiar data-wrangling verbs (join, cut, filter, mutate, summarize, reshape, slice, pretty-print) to the command line with consistent column selection, rich expressions, and streaming-friendly performance. The CLI is inspired by projects such as `csvtk`, `csvkit`, `datamash`, `awk`, `xsv`, and `mlr`, and many options are intentionally compatible with `csvtk` so existing users can transition quickly.
+`tsvkit` is a fast, ergonomic toolkit for working with TSV tables. Written in Rust, it brings familiar data-wrangling verbs (join, cut, filter, mutate, summarize, reshape, slice, pretty-print) to the command line with consistent column selection, rich expressions, and streaming-friendly performance. The CLI is inspired by projects such as `csvtk`, `csvkit`, `datamash`, `awk`, `xsv`, and `mlr`, and many options are intentionally compatible with `csvtk` so existing users can adapt quickly.
 
 ## Table of Contents
 - [Overview](#overview)
