@@ -243,18 +243,86 @@ fn parse_assignment_expression(
     headers: &[String],
     no_header: bool,
 ) -> Result<MutateOp> {
-    let (name_part, value_part) = expr
-        .split_once('=')
-        .with_context(|| "assignment must use name=expression syntax")?;
-    let name = name_part.trim();
-    if name.is_empty() {
-        bail!("missing column name on left-hand side");
+    if let Some((name_part, value_part)) = split_assignment(expr) {
+        let name = name_part.trim();
+        if name.is_empty() {
+            bail!("missing column name on left-hand side");
+        }
+        let function = parse_function(value_part.trim(), headers, no_header)?;
+        return Ok(MutateOp::Create {
+            name: name.to_string(),
+            func: function,
+        });
     }
-    let function = parse_function(value_part.trim(), headers, no_header)?;
-    Ok(MutateOp::Create {
-        name: name.to_string(),
-        func: function,
+
+    if no_header {
+        let auto_name = format!("col{}", headers.len() + 1);
+        let function = parse_function(expr.trim(), headers, no_header)?;
+        return Ok(MutateOp::Create {
+            name: auto_name,
+            func: function,
+        });
+    }
+
+    bail!("assignment must use name=expression syntax")
+}
+
+fn split_assignment(expr: &str) -> Option<(&str, &str)> {
+    find_assignment(expr).map(|idx| {
+        let (left, right_with_eq) = expr.split_at(idx);
+        let right = &right_with_eq[1..];
+        (left, right)
     })
+}
+
+fn find_assignment(expr: &str) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut prev_char: Option<char> = None;
+    let mut prev_non_ws: Option<char> = None;
+
+    let mut iter = expr.char_indices();
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\'' => {
+                if !in_double && prev_char != Some('\\') {
+                    in_single = !in_single;
+                }
+            }
+            '"' => {
+                if !in_single && prev_char != Some('\\') {
+                    in_double = !in_double;
+                }
+            }
+            '=' if !in_single && !in_double => {
+                let mut next_non_ws = None;
+                let mut lookahead = expr[idx + ch.len_utf8()..].chars();
+                while let Some(next) = lookahead.next() {
+                    if next.is_whitespace() {
+                        continue;
+                    }
+                    next_non_ws = Some(next);
+                    break;
+                }
+
+                let prev = prev_non_ws;
+                if matches!(prev, Some('=') | Some('!') | Some('<') | Some('>')) {
+                    // part of ==, !=, <=, >=
+                } else if matches!(next_non_ws, Some('=')) {
+                    // part of ==
+                } else {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+
+        if !ch.is_whitespace() {
+            prev_non_ws = Some(ch);
+        }
+        prev_char = Some(ch);
+    }
+    None
 }
 
 fn parse_function(value: &str, headers: &[String], no_header: bool) -> Result<FunctionSpec> {
