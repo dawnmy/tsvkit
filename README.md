@@ -118,13 +118,16 @@ Selectors are reused in `cut`, `filter`, `join`, `mutate`, `summarize`, and othe
 | ------- | ------- | ------- |
 | `name` | Column by header name. | `sample_id,purity` |
 | `index` | 1-based column index. | `1,4,9` |
+| `-index` | Column counted from the end (1 = last). | `-1,-2` |
 | `start:end` | Inclusive range by name or index. Supports open ends. | `IL6:IL10`, `2:5`, `:IL10`, `IL6:` |
 | `:` | Select every column in order. | `-f ':'` |
 | `mixed` | Combine names, indices, and ranges. | `sample_id,3:5,tech` |
 | `multi-file` | Separate selectors for each input with semicolons (primarily `join`). | `sample_id;subject_id` |
 | `range in expressions` | Prefixed with `$` to access a slice of values. | `$IL6:$IL10` |
 
-> Wrap selectors in backticks to treat punctuation literally. For example, ``-f '`IL6:IL10`,`total,reads`'`` selects columns named `IL6:IL10` and `total,reads` instead of expanding a range or splitting on the comma.
+> Wrap selectors in backticks or braces to treat punctuation literally. For example, ``-f '`IL6:IL10`,`total,reads`'`` or `-f '{IL6:IL10},{total,reads}'` selects columns named `IL6:IL10` and `total,reads` instead of expanding a range or splitting on the comma.
+
+Negative indices are also valid inside ranges: `:-2` selects every column except the final two, while `-3:` keeps the last three columns.
 
 Anywhere you access column *values* inside an expression, prefix the selector with `$` (`$purity`, `$1`, `$IL6:$IL10`).
 
@@ -360,7 +363,7 @@ tsvkit pivot -i gene -c sample_id -v expression examples/expression.tsv
 ```
 
 ### `slice`
-Take specific rows (1-based indices or ranges, including open-ended forms like `:10`, `10:`, or even `:` for everything).
+Take specific rows (1-based indices or ranges, including open-ended forms like `:10`, `10:`, or even `:` for everything). Negative indices count from the end, so `:-2` emits every row except the final two and `-3:` keeps the last three rows.
 
 ```bash
 tsvkit slice -r 1,4:5 examples/samples.tsv

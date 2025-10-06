@@ -10,6 +10,7 @@ use xz2::read::XzDecoder;
 #[derive(Debug, Clone)]
 pub enum ColumnSelector {
     Index(usize),
+    FromEnd(usize),
     Name(String),
     Range(Option<Box<ColumnSelector>>, Option<Box<ColumnSelector>>),
 }
@@ -85,7 +86,7 @@ pub fn resolve_selectors(
     let mut indices = Vec::with_capacity(selectors.len());
     for selector in selectors {
         match selector {
-            ColumnSelector::Index(_) | ColumnSelector::Name(_) => {
+            ColumnSelector::Index(_) | ColumnSelector::FromEnd(_) | ColumnSelector::Name(_) => {
                 let index = resolve_selector_index(headers, selector, no_header)?;
                 indices.push(index);
             }
@@ -215,10 +216,6 @@ fn parse_selector_token(token: SelectorToken) -> Result<ColumnSelector> {
         return Err(anyhow!("empty column selector"));
     }
 
-    if token.quoted {
-        return Ok(ColumnSelector::Name(token.text));
-    }
-
     if let Some((start, end, extra)) = split_range_token(&token.text) {
         if extra {
             bail!(
@@ -248,103 +245,235 @@ fn parse_simple_selector(token: &str) -> Result<ColumnSelector> {
     if token.is_empty() {
         return Err(anyhow!("empty column selector"));
     }
+    if let Some(literal) = parse_backtick_literal(token)? {
+        return Ok(ColumnSelector::Name(literal));
+    }
+    if let Some(literal) = parse_brace_literal(token)? {
+        return Ok(ColumnSelector::Name(literal));
+    }
+    if let Some(stripped) = token.strip_prefix('-') {
+        if stripped.is_empty() {
+            bail!("column selector '-' must include an index");
+        }
+        let offset: usize = stripped
+            .parse()
+            .with_context(|| format!("invalid trailing index '{}'", token))?;
+        if offset == 0 {
+            bail!("column selector '-0' is not allowed");
+        }
+        return Ok(ColumnSelector::FromEnd(offset));
+    }
     if let Ok(idx) = token.parse::<usize>() {
         if idx == 0 {
             bail!("column indices use 1-based positions");
         }
-        Ok(ColumnSelector::Index(idx - 1))
-    } else {
-        Ok(ColumnSelector::Name(token.to_string()))
+        return Ok(ColumnSelector::Index(idx - 1));
     }
+    Ok(ColumnSelector::Name(token.to_string()))
+}
+
+fn parse_backtick_literal(token: &str) -> Result<Option<String>> {
+    let trimmed = token.trim();
+    if !trimmed.starts_with('`') {
+        return Ok(None);
+    }
+    let bytes = trimmed.as_bytes();
+    let mut value = String::new();
+    let mut idx = 1;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if b == b'\\' {
+            idx += 1;
+            if idx >= bytes.len() {
+                bail!("unterminated escape sequence in backtick-quoted column selector");
+            }
+            value.push(bytes[idx] as char);
+            idx += 1;
+            continue;
+        }
+        if b == b'`' {
+            idx += 1;
+            if idx != bytes.len() {
+                bail!("unexpected characters after closing backtick in column selector");
+            }
+            return Ok(Some(value));
+        }
+        value.push(b as char);
+        idx += 1;
+    }
+    bail!("unterminated backtick-quoted column selector");
+}
+
+fn parse_brace_literal(token: &str) -> Result<Option<String>> {
+    let trimmed = token.trim();
+    if !trimmed.starts_with('{') {
+        return Ok(None);
+    }
+    let bytes = trimmed.as_bytes();
+    let mut value = String::new();
+    let mut idx = 1;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if b == b'\\' {
+            idx += 1;
+            if idx >= bytes.len() {
+                bail!("unterminated escape sequence in '{{' column selector");
+            }
+            value.push(bytes[idx] as char);
+            idx += 1;
+            continue;
+        }
+        if b == b'}' {
+            idx += 1;
+            if idx != bytes.len() {
+                bail!("unexpected characters after closing '}}' in column selector");
+            }
+            return Ok(Some(value));
+        }
+        value.push(b as char);
+        idx += 1;
+    }
+    bail!("unterminated '{{' in column selector");
 }
 
 fn split_range_token(token: &str) -> Option<(&str, &str, bool)> {
-    let mut parts = token.split(':');
-    let start = parts.next()?;
-    let end = parts.next()?;
-    let extra = parts.next().is_some();
+    let mut in_backtick = false;
+    let mut in_braces = false;
+    let mut escaped = false;
+    let mut colon_index = None;
+    let mut extra = false;
+    let bytes = token.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if in_backtick {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'`' {
+                in_backtick = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_braces {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'}' {
+                in_braces = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match b {
+            b'`' => {
+                in_backtick = true;
+            }
+            b'{' => {
+                in_braces = true;
+            }
+            b':' => {
+                if colon_index.is_none() {
+                    colon_index = Some(idx);
+                } else {
+                    extra = true;
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    let colon = colon_index?;
+    let start = &token[..colon];
+    let end = &token[colon + 1..];
     Some((start, end, extra))
 }
 
 #[derive(Debug)]
 struct SelectorToken {
     text: String,
-    quoted: bool,
 }
 
 fn tokenize_selector_spec(spec: &str) -> Result<Vec<SelectorToken>> {
     let mut tokens = Vec::new();
+    let mut current = String::new();
     let mut chars = spec.chars().peekable();
+    let mut in_backtick = false;
+    let mut in_braces = false;
+    let mut escaped = false;
 
-    while let Some(&ch) = chars.peek() {
-        if ch.is_whitespace() {
-            chars.next();
-            continue;
-        }
-
-        if ch == '`' {
-            chars.next();
-            let mut value = String::new();
-            let mut closed = false;
-            while let Some(next) = chars.next() {
-                match next {
-                    '`' => {
-                        closed = true;
-                        break;
-                    }
-                    '\\' => {
-                        if let Some(escaped) = chars.next() {
-                            value.push(escaped);
-                        } else {
-                            bail!(
-                                "unterminated escape sequence in backtick-quoted column selector"
-                            );
-                        }
-                    }
-                    other => value.push(other),
-                }
+    while let Some(ch) = chars.next() {
+        if in_backtick {
+            current.push(ch);
+            if escaped {
+                escaped = false;
+                continue;
             }
-            if !closed {
-                bail!("unterminated backtick-quoted column selector");
-            }
-            tokens.push(SelectorToken {
-                text: value,
-                quoted: true,
-            });
-            while let Some(&next) = chars.peek() {
-                if next.is_whitespace() {
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if let Some(&',') = chars.peek() {
-                chars.next();
-            } else if chars.peek().is_some() {
-                bail!("missing comma after column selector");
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '`' {
+                in_backtick = false;
             }
             continue;
         }
-
-        let mut value = String::new();
-        while let Some(&next) = chars.peek() {
-            if next == ',' {
-                break;
+        if in_braces {
+            current.push(ch);
+            if escaped {
+                escaped = false;
+                continue;
             }
-            value.push(next);
-            chars.next();
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '}' {
+                in_braces = false;
+            }
+            continue;
         }
-        let trimmed = value.trim();
+        match ch {
+            ',' => {
+                let trimmed = current.trim();
+                if trimmed.is_empty() {
+                    bail!("column specification must not be empty");
+                }
+                tokens.push(SelectorToken {
+                    text: trimmed.to_string(),
+                });
+                current.clear();
+            }
+            '`' => {
+                current.push(ch);
+                in_backtick = true;
+                escaped = false;
+            }
+            '{' => {
+                current.push(ch);
+                in_braces = true;
+                escaped = false;
+            }
+            c if c.is_whitespace() && current.is_empty() => {
+                continue;
+            }
+            other => current.push(other),
+        }
+    }
+
+    if in_backtick {
+        bail!("unterminated backtick-quoted column selector");
+    }
+    if in_braces {
+        bail!("unterminated '{{' in column selector");
+    }
+    if !current.is_empty() {
+        let trimmed = current.trim();
         if trimmed.is_empty() {
             bail!("column specification must not be empty");
         }
         tokens.push(SelectorToken {
             text: trimmed.to_string(),
-            quoted: false,
         });
-        if let Some(&',') = chars.peek() {
-            chars.next();
-        }
     }
 
     Ok(tokens)
@@ -366,6 +495,20 @@ fn resolve_selector_index(
                 );
             }
             Ok(index)
+        }
+        ColumnSelector::FromEnd(offset) => {
+            let offset = *offset;
+            if offset == 0 {
+                bail!("column selector '-0' is not allowed");
+            }
+            if offset > headers.len() {
+                bail!(
+                    "column selector '-{}' out of range ({} columns)",
+                    offset,
+                    headers.len()
+                );
+            }
+            Ok(headers.len() - offset)
         }
         ColumnSelector::Name(name) => {
             if no_header {
@@ -456,6 +599,42 @@ mod tests {
     fn quoted_tokens_ignore_range_syntax() {
         let selectors = parse_selector_list("`2:4`").unwrap();
         assert!(matches!(selectors[0], ColumnSelector::Name(ref name) if name == "2:4"));
+    }
+
+    #[test]
+    fn quoted_names_allow_ranges() {
+        let selectors = parse_selector_list("`dna_ug`:`rna_ug`").unwrap();
+        assert!(matches!(
+            selectors[0],
+            ColumnSelector::Range(Some(ref start), Some(ref end))
+                if matches!(**start, ColumnSelector::Name(ref name) if name == "dna_ug")
+                    && matches!(**end, ColumnSelector::Name(ref name) if name == "rna_ug")
+        ));
+    }
+
+    #[test]
+    fn quoted_names_allow_open_range() {
+        let selectors = parse_selector_list("`dna_ug`:").unwrap();
+        assert!(matches!(
+            selectors[0],
+            ColumnSelector::Range(Some(ref start), None)
+                if matches!(**start, ColumnSelector::Name(ref name) if name == "dna_ug")
+        ));
+    }
+
+    #[test]
+    fn parses_brace_literals() {
+        let selectors = parse_selector_list("{a:b},plain").unwrap();
+        assert!(matches!(selectors[0], ColumnSelector::Name(ref name) if name == "a:b"));
+        assert!(matches!(selectors[1], ColumnSelector::Name(ref name) if name == "plain"));
+    }
+
+    #[test]
+    fn parses_negative_indices() {
+        let headers = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let selectors = parse_selector_list("-1,-2").unwrap();
+        let indices = resolve_selectors(&headers, &selectors, false).unwrap();
+        assert_eq!(indices, vec![2, 1]);
     }
 
     #[test]

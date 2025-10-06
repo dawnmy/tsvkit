@@ -47,8 +47,8 @@ pub struct SliceArgs {
 }
 
 pub fn run(args: SliceArgs) -> Result<()> {
-    let ranges = parse_row_spec(&args.rows)?;
-    if ranges.is_empty() {
+    let selection = parse_row_spec(&args.rows)?;
+    if selection.is_empty() {
         bail!("row specification must select at least one row");
     }
 
@@ -60,40 +60,116 @@ pub fn run(args: SliceArgs) -> Result<()> {
     let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
     let mut writer = BufWriter::new(io::stdout().lock());
 
-    let mut data_row_idx = 0usize;
-
-    if args.no_header {
-        for record in reader.records() {
-            let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
-            if should_skip_record(&record, &input_opts, None) {
-                continue;
+    if !selection.requires_from_end() {
+        let ranges = selection.resolve_absolute()?;
+        if ranges.is_empty() {
+            bail!("row specification must select at least one row");
+        }
+        if args.no_header {
+            let mut expected_width: Option<usize> = None;
+            let mut data_row_idx = 0usize;
+            for record in reader.records() {
+                let record =
+                    record.with_context(|| format!("failed reading from {:?}", args.file))?;
+                if should_skip_record(&record, &input_opts, expected_width) {
+                    continue;
+                }
+                if expected_width.is_none() {
+                    expected_width = Some(record.len());
+                }
+                data_row_idx += 1;
+                if row_selected(data_row_idx, &ranges) {
+                    writer.write_all(record.iter().collect::<Vec<_>>().join("\t").as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
             }
-            data_row_idx += 1;
-            if row_selected(data_row_idx, &ranges) {
-                writer.write_all(record.iter().collect::<Vec<_>>().join("\t").as_bytes())?;
+        } else {
+            let headers = reader
+                .headers()
+                .with_context(|| format!("failed reading header from {:?}", args.file))?
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            if !headers.is_empty() {
+                writer.write_all(headers.join("\t").as_bytes())?;
                 writer.write_all(b"\n")?;
+            }
+            let mut data_row_idx = 0usize;
+            for record in reader.records() {
+                let record =
+                    record.with_context(|| format!("failed reading from {:?}", args.file))?;
+                if should_skip_record(&record, &input_opts, Some(headers.len())) {
+                    continue;
+                }
+                data_row_idx += 1;
+                if row_selected(data_row_idx, &ranges) {
+                    writer.write_all(record.iter().collect::<Vec<_>>().join("\t").as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
             }
         }
     } else {
-        let headers = reader
-            .headers()
-            .with_context(|| format!("failed reading header from {:?}", args.file))?
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-        if !headers.is_empty() {
-            writer.write_all(headers.join("\t").as_bytes())?;
-            writer.write_all(b"\n")?;
-        }
-        for record in reader.records() {
-            let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
-            if should_skip_record(&record, &input_opts, Some(headers.len())) {
-                continue;
+        if args.no_header {
+            let mut expected_width: Option<usize> = None;
+            let mut data_rows = Vec::new();
+            for record in reader.records() {
+                let record =
+                    record.with_context(|| format!("failed reading from {:?}", args.file))?;
+                if should_skip_record(&record, &input_opts, expected_width) {
+                    continue;
+                }
+                if expected_width.is_none() {
+                    expected_width = Some(record.len());
+                }
+                data_rows.push(record);
             }
-            data_row_idx += 1;
-            if row_selected(data_row_idx, &ranges) {
-                writer.write_all(record.iter().collect::<Vec<_>>().join("\t").as_bytes())?;
+            if data_rows.is_empty() {
+                writer.flush()?;
+                return Ok(());
+            }
+            let ranges = selection.resolve_with_total(data_rows.len())?;
+            if ranges.is_empty() {
+                bail!("row specification must select at least one row");
+            }
+            for (idx, record) in data_rows.iter().enumerate() {
+                if row_selected(idx + 1, &ranges) {
+                    writer.write_all(record.iter().collect::<Vec<_>>().join("\t").as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
+            }
+        } else {
+            let headers = reader
+                .headers()
+                .with_context(|| format!("failed reading header from {:?}", args.file))?
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            if !headers.is_empty() {
+                writer.write_all(headers.join("\t").as_bytes())?;
                 writer.write_all(b"\n")?;
+            }
+            let mut data_rows = Vec::new();
+            for record in reader.records() {
+                let record =
+                    record.with_context(|| format!("failed reading from {:?}", args.file))?;
+                if should_skip_record(&record, &input_opts, Some(headers.len())) {
+                    continue;
+                }
+                data_rows.push(record);
+            }
+            if data_rows.is_empty() {
+                writer.flush()?;
+                return Ok(());
+            }
+            let ranges = selection.resolve_with_total(data_rows.len())?;
+            if ranges.is_empty() {
+                bail!("row specification must select at least one row");
+            }
+            for (idx, record) in data_rows.iter().enumerate() {
+                if row_selected(idx + 1, &ranges) {
+                    writer.write_all(record.iter().collect::<Vec<_>>().join("\t").as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
             }
         }
     }
@@ -102,32 +178,65 @@ pub fn run(args: SliceArgs) -> Result<()> {
     Ok(())
 }
 
-fn parse_row_spec(spec: &str) -> Result<Vec<RowRange>> {
-    let mut ranges = Vec::new();
+fn parse_row_spec(spec: &str) -> Result<RowSelection> {
+    let mut specs = Vec::new();
     for token in spec.split(',') {
         let trimmed = token.trim();
         if trimmed.is_empty() {
             continue;
         }
         if let Some((start, end)) = trimmed.split_once(':') {
-            let start_idx = parse_optional_index(start)?;
-            let end_idx = parse_optional_index(end)?;
-            if let (Some(s), Some(e)) = (start_idx, end_idx) {
+            let start_ep = parse_optional_row_endpoint(start)?;
+            let end_ep = parse_optional_row_endpoint(end)?;
+            if let (Some(RowEndpoint::Absolute(s)), Some(RowEndpoint::Absolute(e))) =
+                (start_ep, end_ep)
+            {
                 if s > e {
                     bail!("row range start {} is greater than end {}", s, e);
                 }
             }
-            ranges.push(RowRange {
-                start: start_idx,
-                end: end_idx,
+            specs.push(RowRangeSpec {
+                start: start_ep,
+                end: end_ep,
             });
         } else {
-            let idx = parse_positive_index(trimmed)?;
-            ranges.push(RowRange {
-                start: Some(idx),
-                end: Some(idx),
+            let endpoint = parse_row_endpoint(trimmed)?;
+            specs.push(RowRangeSpec {
+                start: Some(endpoint),
+                end: Some(endpoint),
             });
         }
+    }
+    Ok(RowSelection { specs })
+}
+
+fn convert_row_specs(selection: &RowSelection, total_rows: Option<usize>) -> Result<Vec<RowRange>> {
+    let mut ranges = Vec::with_capacity(selection.specs.len());
+    for spec in &selection.specs {
+        let start = match spec.start {
+            Some(RowEndpoint::Absolute(idx)) => Some(idx),
+            Some(RowEndpoint::FromEnd(offset)) => {
+                let total = total_rows
+                    .with_context(|| "row selector requires total row count to resolve")?;
+                Some(resolve_from_end(offset, total)?)
+            }
+            None => None,
+        };
+        let end = match spec.end {
+            Some(RowEndpoint::Absolute(idx)) => Some(idx),
+            Some(RowEndpoint::FromEnd(offset)) => {
+                let total = total_rows
+                    .with_context(|| "row selector requires total row count to resolve")?;
+                Some(resolve_from_end(offset, total)?)
+            }
+            None => None,
+        };
+        if let (Some(s), Some(e)) = (start, end) {
+            if s > e {
+                bail!("row range start {} is greater than end {}", s, e);
+            }
+        }
+        ranges.push(RowRange { start, end });
     }
     ranges.sort_by_key(|r| r.start.unwrap_or(1));
     merge_ranges(ranges)
@@ -170,22 +279,49 @@ fn row_selected(row_idx: usize, ranges: &[RowRange]) -> bool {
     false
 }
 
-fn parse_positive_index(text: &str) -> Result<usize> {
-    let value: usize = text
-        .parse()
-        .with_context(|| format!("invalid row index '{}'", text))?;
-    if value == 0 {
-        bail!("row indices are 1-based");
+fn parse_row_endpoint(text: &str) -> Result<RowEndpoint> {
+    if let Some(stripped) = text.strip_prefix('-') {
+        if stripped.is_empty() {
+            bail!("row selector '-' must include an index");
+        }
+        let value: usize = stripped
+            .parse()
+            .with_context(|| format!("invalid row index '{}'", text))?;
+        if value == 0 {
+            bail!("row selector '-0' is not allowed");
+        }
+        Ok(RowEndpoint::FromEnd(value))
+    } else {
+        let value: usize = text
+            .parse()
+            .with_context(|| format!("invalid row index '{}'", text))?;
+        if value == 0 {
+            bail!("row indices are 1-based");
+        }
+        Ok(RowEndpoint::Absolute(value))
     }
-    Ok(value)
 }
 
-fn parse_optional_index(text: &str) -> Result<Option<usize>> {
+fn parse_optional_row_endpoint(text: &str) -> Result<Option<RowEndpoint>> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    parse_positive_index(trimmed).map(Some)
+    parse_row_endpoint(trimmed).map(Some)
+}
+
+fn resolve_from_end(offset: usize, total_rows: usize) -> Result<usize> {
+    if offset == 0 {
+        bail!("row selector '-0' is not allowed");
+    }
+    if offset > total_rows {
+        bail!(
+            "row selector '-{}' exceeds total row count {}",
+            offset,
+            total_rows
+        );
+    }
+    Ok(total_rows - offset + 1)
 }
 
 fn ranges_touch_or_overlap(a: &RowRange, b: &RowRange) -> bool {
@@ -216,6 +352,44 @@ fn merge_pair(mut a: RowRange, b: RowRange) -> RowRange {
     a
 }
 
+#[derive(Clone, Debug)]
+struct RowSelection {
+    specs: Vec<RowRangeSpec>,
+}
+
+impl RowSelection {
+    fn is_empty(&self) -> bool {
+        self.specs.is_empty()
+    }
+
+    fn requires_from_end(&self) -> bool {
+        self.specs.iter().any(|spec| {
+            matches!(spec.start, Some(RowEndpoint::FromEnd(_)))
+                || matches!(spec.end, Some(RowEndpoint::FromEnd(_)))
+        })
+    }
+
+    fn resolve_absolute(&self) -> Result<Vec<RowRange>> {
+        convert_row_specs(self, None)
+    }
+
+    fn resolve_with_total(&self, total_rows: usize) -> Result<Vec<RowRange>> {
+        convert_row_specs(self, Some(total_rows))
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct RowRangeSpec {
+    start: Option<RowEndpoint>,
+    end: Option<RowEndpoint>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum RowEndpoint {
+    Absolute(usize),
+    FromEnd(usize),
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct RowRange {
     start: Option<usize>,
@@ -228,7 +402,8 @@ mod tests {
 
     #[test]
     fn parse_single_rows() {
-        let ranges = parse_row_spec("1,5,10").unwrap();
+        let selection = parse_row_spec("1,5,10").unwrap();
+        let ranges = selection.resolve_absolute().unwrap();
         assert_eq!(
             ranges,
             vec![
@@ -250,7 +425,8 @@ mod tests {
 
     #[test]
     fn parse_ranges() {
-        let ranges = parse_row_spec("1:3,10:12").unwrap();
+        let selection = parse_row_spec("1:3,10:12").unwrap();
+        let ranges = selection.resolve_absolute().unwrap();
         assert_eq!(
             ranges,
             vec![
@@ -268,7 +444,8 @@ mod tests {
 
     #[test]
     fn merge_overlapping_ranges() {
-        let ranges = parse_row_spec("1:3,2:5,10").unwrap();
+        let selection = parse_row_spec("1:3,2:5,10").unwrap();
+        let ranges = selection.resolve_absolute().unwrap();
         assert_eq!(
             ranges,
             vec![
@@ -286,7 +463,8 @@ mod tests {
 
     #[test]
     fn parse_open_start_range() {
-        let ranges = parse_row_spec(":5").unwrap();
+        let selection = parse_row_spec(":5").unwrap();
+        let ranges = selection.resolve_absolute().unwrap();
         assert_eq!(
             ranges,
             vec![RowRange {
@@ -298,7 +476,8 @@ mod tests {
 
     #[test]
     fn parse_open_end_range() {
-        let ranges = parse_row_spec("10:").unwrap();
+        let selection = parse_row_spec("10:").unwrap();
+        let ranges = selection.resolve_absolute().unwrap();
         assert_eq!(
             ranges,
             vec![RowRange {
@@ -310,7 +489,8 @@ mod tests {
 
     #[test]
     fn parse_full_range() {
-        let ranges = parse_row_spec(":").unwrap();
+        let selection = parse_row_spec(":").unwrap();
+        let ranges = selection.resolve_absolute().unwrap();
         assert_eq!(
             ranges,
             vec![RowRange {
@@ -323,5 +503,25 @@ mod tests {
     #[test]
     fn reject_zero_index() {
         assert!(parse_row_spec("0").is_err());
+    }
+
+    #[test]
+    fn parse_from_end_range() {
+        let selection = parse_row_spec("-3:").unwrap();
+        assert!(selection.requires_from_end());
+        let ranges = selection.resolve_with_total(5).unwrap();
+        assert_eq!(
+            ranges,
+            vec![RowRange {
+                start: Some(3),
+                end: None
+            }]
+        );
+    }
+
+    #[test]
+    fn from_end_range_errors_when_too_large() {
+        let selection = parse_row_spec(":-2").unwrap();
+        assert!(selection.resolve_with_total(1).is_err());
     }
 }

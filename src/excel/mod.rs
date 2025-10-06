@@ -151,7 +151,24 @@ struct ColumnToken {
 
 #[derive(Debug, Clone)]
 struct RowFilter {
+    ranges: Vec<RowRangeSpec>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRowFilter {
     ranges: Vec<(Option<usize>, Option<usize>)>,
+}
+
+#[derive(Debug, Clone)]
+struct RowRangeSpec {
+    start: Option<RowBound>,
+    end: Option<RowBound>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RowBound {
+    Absolute(usize),
+    FromEnd(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -454,25 +471,25 @@ fn parse_row_filter(spec: &str) -> Result<RowFilter> {
             continue;
         }
         if let Some((start, end)) = token.split_once(':') {
-            let start_idx = if start.trim().is_empty() {
-                None
-            } else {
-                Some(parse_positive_index(start.trim())?)
-            };
-            let end_idx = if end.trim().is_empty() {
-                None
-            } else {
-                Some(parse_positive_index(end.trim())?)
-            };
-            if let (Some(s), Some(e)) = (start_idx, end_idx) {
+            let start_bound = parse_optional_row_bound(start)?;
+            let end_bound = parse_optional_row_bound(end)?;
+            if let (Some(RowBound::Absolute(s)), Some(RowBound::Absolute(e))) =
+                (start_bound, end_bound)
+            {
                 if s > e {
                     bail!("row range start {} exceeds end {}", s, e);
                 }
             }
-            ranges.push((start_idx, end_idx));
+            ranges.push(RowRangeSpec {
+                start: start_bound,
+                end: end_bound,
+            });
         } else {
-            let value = parse_positive_index(token)?;
-            ranges.push((Some(value), Some(value)));
+            let bound = parse_row_bound(token)?;
+            ranges.push(RowRangeSpec {
+                start: Some(bound),
+                end: Some(bound),
+            });
         }
     }
     if ranges.is_empty() {
@@ -489,6 +506,70 @@ fn parse_positive_index(token: &str) -> Result<usize> {
         bail!("indices are 1-based");
     }
     Ok(value)
+}
+
+fn parse_row_bound(text: &str) -> Result<RowBound> {
+    if let Some(stripped) = text.trim().strip_prefix('-') {
+        if stripped.is_empty() {
+            bail!("row selector '-' must include an index");
+        }
+        let value: usize = stripped
+            .parse()
+            .with_context(|| format!("invalid 1-based index '{}'", text))?;
+        if value == 0 {
+            bail!("row selector '-0' is not allowed");
+        }
+        Ok(RowBound::FromEnd(value))
+    } else {
+        parse_positive_index(text.trim()).map(RowBound::Absolute)
+    }
+}
+
+fn parse_optional_row_bound(text: &str) -> Result<Option<RowBound>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    parse_row_bound(trimmed).map(Some)
+}
+
+impl RowFilter {
+    fn resolve(&self, total_rows: usize) -> Result<ResolvedRowFilter> {
+        let mut ranges = Vec::with_capacity(self.ranges.len());
+        for spec in &self.ranges {
+            let start = match spec.start {
+                Some(RowBound::Absolute(value)) => Some(value),
+                Some(RowBound::FromEnd(offset)) => Some(resolve_row_bound(offset, total_rows)?),
+                None => None,
+            };
+            let end = match spec.end {
+                Some(RowBound::Absolute(value)) => Some(value),
+                Some(RowBound::FromEnd(offset)) => Some(resolve_row_bound(offset, total_rows)?),
+                None => None,
+            };
+            if let (Some(s), Some(e)) = (start, end) {
+                if s > e {
+                    bail!("row range start {} exceeds end {}", s, e);
+                }
+            }
+            ranges.push((start, end));
+        }
+        Ok(ResolvedRowFilter { ranges })
+    }
+}
+
+fn resolve_row_bound(offset: usize, total_rows: usize) -> Result<usize> {
+    if offset == 0 {
+        bail!("row selector '-0' is not allowed");
+    }
+    if offset > total_rows {
+        bail!(
+            "row selector '-{}' exceeds total row count {}",
+            offset,
+            total_rows
+        );
+    }
+    Ok(total_rows - offset + 1)
 }
 
 fn resolve_columns(
@@ -770,13 +851,16 @@ fn emit_table(
         return Ok(());
     }
 
+    let resolved_filter = row_filter
+        .map(|filter| filter.resolve(data_total_rows))
+        .transpose()?;
     let mut data_row_number = 0usize;
     let start_row = if has_header { 1 } else { 0 };
 
     for row_idx in start_row..height {
         let absolute_row = start.0 as usize + row_idx;
         data_row_number += 1;
-        if let Some(filter) = row_filter {
+        if let Some(filter) = resolved_filter.as_ref() {
             if !row_filter_contains(filter, data_row_number, data_total_rows) {
                 continue;
             }
@@ -803,7 +887,7 @@ fn emit_table(
     Ok(())
 }
 
-fn row_filter_contains(filter: &RowFilter, row: usize, total_rows: usize) -> bool {
+fn row_filter_contains(filter: &ResolvedRowFilter, row: usize, total_rows: usize) -> bool {
     for (start, end) in &filter.ranges {
         let start_idx = start.unwrap_or(1);
         let end_idx = end.unwrap_or(total_rows);

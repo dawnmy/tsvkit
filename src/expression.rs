@@ -5,7 +5,9 @@ use anyhow::{Context, Result, bail};
 use regex::Regex;
 
 use crate::aggregate::{AggregateKind, evaluate_row_aggregate, try_parse_aggregate_kind};
-use crate::common::{ColumnSelector, parse_selector_list, resolve_selectors};
+use crate::common::{
+    ColumnSelector, parse_selector_list, parse_single_selector, resolve_selectors,
+};
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -878,14 +880,9 @@ impl<'a> Lexer<'a> {
             }
             return Ok(Some(Token::Columns(selectors)));
         }
-        if let Ok(idx) = text.parse::<usize>() {
-            if idx == 0 {
-                bail!("column indices use 1-based positions");
-            }
-            Ok(Some(Token::Column(ColumnSelector::Index(idx - 1))))
-        } else {
-            Ok(Some(Token::Column(ColumnSelector::Name(text.to_string()))))
-        }
+        let selector = parse_single_selector(text)
+            .with_context(|| format!("invalid column selector '{}'", text))?;
+        Ok(Some(Token::Column(selector)))
     }
 
     fn lex_string(&mut self) -> Result<Option<Token>> {
