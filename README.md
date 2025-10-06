@@ -30,7 +30,7 @@
 - [Additional tips](#additional-tips)
 
 ## Overview
-`tsvkit` combines versatile column selection with an expression engine for statistics, filtering, and data transformation. This makes it straightforward to generate matrices from `samtools idxstats` or `featureCounts`, compute multi-column summaries, or pipe TSV/Excel data through complex workflows without leaving the shell. Multi-sheet Excel workbooks are supported alongside `.tsv`, `.tsv.gz`, and `.tsv.xz` files.
+`tsvkit` combines versatile column selection with an expression engine for statistics, filtering, and data transformation. This makes it straightforward to join multiple files and select column from each file to generate data matrix (e.g. gene count table), filter row based on selected columns, compute multi-column summaries, or pipe TSV/Excel data through complex workflows without leaving the shell. Multi-sheet Excel workbooks are supported alongside `.tsv`, `.tsv.gz`, and `.tsv.xz` files.
 
 ### Key features
 - Stream-friendly processing; every command reads from files or standard input and writes to standard output.
