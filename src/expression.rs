@@ -4,7 +4,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 
-use crate::common::{ColumnSelector, parse_selector_list, resolve_selectors};
+use crate::aggregate::{AggregateKind, evaluate_row_aggregate, try_parse_aggregate_kind};
+use crate::common::{
+    ColumnSelector, parse_selector_list, parse_single_selector, resolve_selectors,
+};
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -24,6 +27,13 @@ pub enum ValueExpr {
     Unary(UnaryOp, Box<ValueExpr>),
     Binary(BinaryOp, Box<ValueExpr>, Box<ValueExpr>),
     Function(FunctionName, Box<ValueExpr>),
+    Aggregate(AggregateSpecExpr),
+}
+
+#[derive(Debug, Clone)]
+pub struct AggregateSpecExpr {
+    pub kind: AggregateKind,
+    pub selectors: Vec<ColumnSelector>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +47,7 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Pow,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +108,7 @@ enum Token {
     Minus,
     Star,
     Slash,
+    Caret,
 }
 
 pub fn parse_expression(input: &str) -> Result<Expr> {
@@ -199,6 +211,13 @@ pub enum BoundValue {
     Unary(UnaryOp, Box<BoundValue>),
     Binary(BinaryOp, Box<BoundValue>, Box<BoundValue>),
     Function(FunctionName, Box<BoundValue>),
+    Aggregate(BoundAggregate),
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundAggregate {
+    pub kind: AggregateKind,
+    pub columns: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -307,6 +326,14 @@ where
                             numeric_eval(a / b)
                         }
                     }
+                    BinaryOp::Pow => {
+                        let value = a.powf(b);
+                        if value.is_finite() {
+                            numeric_eval(value)
+                        } else {
+                            empty_eval()
+                        }
+                    }
                 },
                 _ => empty_eval(),
             }
@@ -335,6 +362,18 @@ where
                 result.map(numeric_eval).unwrap_or_else(empty_eval)
             } else {
                 empty_eval()
+            }
+        }
+        BoundValue::Aggregate(spec) => {
+            let values = spec
+                .columns
+                .iter()
+                .map(|&idx| row.get(idx).unwrap_or(""))
+                .collect::<Vec<_>>();
+            let result = evaluate_row_aggregate(&spec.kind, &values);
+            EvalValue {
+                text: Cow::Owned(result.text),
+                numeric: result.numeric,
             }
         }
     }
@@ -443,6 +482,20 @@ fn bind_value(value: ValueExpr, headers: &[String], no_header: bool) -> Result<B
             } else {
                 Ok(BoundValue::Columns(indices))
             }
+        }
+        ValueExpr::Aggregate(spec) => {
+            let mut indices = Vec::new();
+            for selector in spec.selectors {
+                let mut resolved = resolve_selectors(headers, &[selector], no_header)?;
+                indices.append(&mut resolved);
+            }
+            if indices.is_empty() {
+                bail!("aggregate selector resolved to no columns");
+            }
+            Ok(BoundValue::Aggregate(BoundAggregate {
+                kind: spec.kind,
+                columns: indices,
+            }))
         }
         ValueExpr::String(text) => Ok(BoundValue::String(text)),
         ValueExpr::Number(number) => Ok(BoundValue::Number(number)),
@@ -582,6 +635,52 @@ mod tests {
         ];
         assert!(evaluate(&bound, &row));
     }
+
+    #[test]
+    fn subtraction_without_spaces_between_columns() {
+        let expr = parse_expression("($dna_ug-$rna_ug)>10").unwrap();
+        let headers = vec!["dna_ug".to_string(), "rna_ug".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec!["25.0".to_string(), "12.0".to_string()];
+        assert!(evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn subtraction_with_space_after_minus() {
+        let expr = parse_expression("($dna_ug- $rna_ug)>10").unwrap();
+        let headers = vec!["dna_ug".to_string(), "rna_ug".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec!["22.0".to_string(), "5.0".to_string()];
+        assert!(evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn exponentiation_operator_supported() {
+        let expr = parse_value_expression("$dna_ug^2").unwrap();
+        let headers = vec!["dna_ug".to_string()];
+        let bound = bind_value_expression(expr, &headers, false).unwrap();
+        let row = vec!["3".to_string()];
+        let eval = eval_value(&bound, &row);
+        assert_eq!(eval.numeric, Some(9.0));
+    }
+
+    #[test]
+    fn exponentiation_is_right_associative() {
+        let expr = parse_value_expression("2^3^2").unwrap();
+        let bound = bind_value_expression(expr, &[], false).unwrap();
+        let row: Vec<String> = Vec::new();
+        let eval = eval_value(&bound, &row);
+        assert_eq!(eval.numeric, Some(512.0));
+    }
+
+    #[test]
+    fn braces_allow_literal_column_names() {
+        let expr = parse_expression("${dna-}").unwrap();
+        let headers = vec!["dna-".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec!["value".to_string()];
+        assert!(evaluate(&bound, &row));
+    }
 }
 
 impl<'a> Lexer<'a> {
@@ -681,6 +780,10 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
                 Ok(Some(Token::Slash))
             }
+            b'^' => {
+                self.pos += 1;
+                Ok(Some(Token::Caret))
+            }
             c if c.is_ascii_digit() || c == b'.' => self.lex_number(),
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let ident = self.lex_identifier();
@@ -692,6 +795,28 @@ impl<'a> Lexer<'a> {
 
     fn lex_column(&mut self) -> Result<Option<Token>> {
         self.pos += 1;
+        if self.match_char(b'{') {
+            self.pos += 1;
+            let mut value = String::new();
+            let mut escaped = false;
+            while self.pos < self.chars.len() {
+                let c = self.chars[self.pos];
+                self.pos += 1;
+                if escaped {
+                    value.push(c as char);
+                    escaped = false;
+                    continue;
+                }
+                match c {
+                    b'\\' => escaped = true,
+                    b'}' => {
+                        return Ok(Some(Token::Column(ColumnSelector::Name(value))));
+                    }
+                    other => value.push(other as char),
+                }
+            }
+            bail!("unterminated '{{' in column selector");
+        }
         let start = self.pos;
         let mut is_numeric = true;
         let mut has_range_syntax = false;
@@ -722,6 +847,19 @@ impl<'a> Lexer<'a> {
                 if is_numeric && self.pos > start {
                     break;
                 }
+                let mut should_break = false;
+                if self.pos > start {
+                    if let Some(next) = self.peek_non_whitespace(1) {
+                        should_break = matches!(
+                            next,
+                            b'$' | b'(' | b')' | b'+' | b'-' | b'*' | b'/' | b'^' | b'"'
+                        ) || next.is_ascii_digit()
+                            || next == b'.';
+                    }
+                }
+                if should_break {
+                    break;
+                }
                 is_numeric = false;
                 self.pos += 1;
                 continue;
@@ -742,14 +880,9 @@ impl<'a> Lexer<'a> {
             }
             return Ok(Some(Token::Columns(selectors)));
         }
-        if let Ok(idx) = text.parse::<usize>() {
-            if idx == 0 {
-                bail!("column indices use 1-based positions");
-            }
-            Ok(Some(Token::Column(ColumnSelector::Index(idx - 1))))
-        } else {
-            Ok(Some(Token::Column(ColumnSelector::Name(text.to_string()))))
-        }
+        let selector = parse_single_selector(text)
+            .with_context(|| format!("invalid column selector '{}'", text))?;
+        Ok(Some(Token::Column(selector)))
     }
 
     fn lex_string(&mut self) -> Result<Option<Token>> {
@@ -829,6 +962,18 @@ impl<'a> Lexer<'a> {
         self.chars.get(self.pos + offset).copied()
     }
 
+    fn peek_non_whitespace(&self, offset: usize) -> Option<u8> {
+        let mut idx = self.pos + offset;
+        while idx < self.chars.len() {
+            let c = self.chars[idx];
+            if !c.is_ascii_whitespace() {
+                return Some(c);
+            }
+            idx += 1;
+        }
+        None
+    }
+
     fn skip_whitespace(&mut self) {
         while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_whitespace() {
             self.pos += 1;
@@ -883,10 +1028,27 @@ impl Parser {
         ) {
             self.parse_regex_without_left()
         } else if self.match_token(TokenKind::LParen) {
+            let saved_pos = self.pos;
             self.pos += 1;
             let expr = self.parse_expr()?;
             if !self.consume_token(TokenKind::RParen) {
                 bail!("missing closing ')' in expression");
+            }
+            if matches!(expr, Expr::Value(_)) {
+                if let Some(next) = self.peek_token() {
+                    if matches!(
+                        next,
+                        Token::Compare(_)
+                            | Token::Plus
+                            | Token::Minus
+                            | Token::Star
+                            | Token::Slash
+                            | Token::Caret
+                    ) {
+                        self.pos = saved_pos;
+                        return self.parse_comparison();
+                    }
+                }
             }
             Ok(expr)
         } else {
@@ -960,19 +1122,29 @@ impl Parser {
     }
 
     fn parse_term(&mut self) -> Result<ValueExpr> {
-        let mut expr = self.parse_factor()?;
+        let mut expr = self.parse_power()?;
         loop {
             if self.match_token(TokenKind::Star) {
                 self.pos += 1;
-                let rhs = self.parse_factor()?;
+                let rhs = self.parse_power()?;
                 expr = ValueExpr::Binary(BinaryOp::Mul, Box::new(expr), Box::new(rhs));
             } else if self.match_token(TokenKind::Slash) {
                 self.pos += 1;
-                let rhs = self.parse_factor()?;
+                let rhs = self.parse_power()?;
                 expr = ValueExpr::Binary(BinaryOp::Div, Box::new(expr), Box::new(rhs));
             } else {
                 break;
             }
+        }
+        Ok(expr)
+    }
+
+    fn parse_power(&mut self) -> Result<ValueExpr> {
+        let mut expr = self.parse_factor()?;
+        if self.match_token(TokenKind::Caret) {
+            self.pos += 1;
+            let rhs = self.parse_power()?;
+            expr = ValueExpr::Binary(BinaryOp::Pow, Box::new(expr), Box::new(rhs));
         }
         Ok(expr)
     }
@@ -1029,6 +1201,20 @@ impl Parser {
                     if !self.consume_token(TokenKind::RParen) {
                         bail!("missing ')' after function call");
                     }
+                    if let Some(kind) = try_parse_aggregate_kind(&name)? {
+                        let selectors = match argument {
+                            ValueExpr::Column(selector) => vec![selector],
+                            ValueExpr::Columns(list) => list,
+                            other => {
+                                bail!(
+                                    "function '{}' expects column selectors, got {:?}",
+                                    name,
+                                    other
+                                )
+                            }
+                        };
+                        return Ok(ValueExpr::Aggregate(AggregateSpecExpr { kind, selectors }));
+                    }
                     let func = FunctionName::from_ident(&name)?;
                     Ok(ValueExpr::Function(func, Box::new(argument)))
                 } else {
@@ -1067,6 +1253,7 @@ impl Parser {
             (TokenKind::Minus, Some(Token::Minus)) => true,
             (TokenKind::Star, Some(Token::Star)) => true,
             (TokenKind::Slash, Some(Token::Slash)) => true,
+            (TokenKind::Caret, Some(Token::Caret)) => true,
             _ => false,
         }
     }
@@ -1108,4 +1295,5 @@ enum TokenKind {
     Minus,
     Star,
     Slash,
+    Caret,
 }

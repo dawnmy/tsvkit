@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use regex::Regex;
 
+use crate::aggregate::{AggregateKind, evaluate_row_aggregate, try_parse_aggregate_kind};
 use crate::common::{
     InputOptions, default_headers, parse_selector_list, reader_for_path, resolve_selectors,
     should_skip_record,
@@ -14,7 +15,7 @@ use crate::expression::{BoundValue, bind_value_expression, eval_value, parse_val
 #[derive(Args, Debug)]
 #[command(
     about = "Create or transform TSV columns",
-    long_about = r#"Add derived columns or rewrite existing ones. Use -e/--expr to specify operations. Assignments can be arbitrary expressions (`name=EXPR`) using the filter expression language (column selectors, arithmetic, abs/sqrt/exp/ln/log/log2/log10/exp2, regex matches, etc.), row-wise aggregates (sum, mean, median, sd, q1–q4, q0.25, p95, etc.), or string helpers like sub(). Always prefix column references with `$`, including columns created earlier in the same invocation (e.g. `log_total=log2($total)`), and wrap each -e argument in single quotes so the shell leaves `$` selectors alone. You can also run in-place substitutions with sed-style syntax s/selectors/pattern/replacement/.
+    long_about = r#"Add derived columns or rewrite existing ones. Use -e/--expr to specify operations. Assignments can be arbitrary expressions (`name=EXPR`) using the filter expression language (column selectors, arithmetic, abs/sqrt/exp/ln/log/log2/log10/exp2, regex matches, etc.), row-wise aggregates (sum, mean, median, trimmean, iqr, sd/var, min/max/absmin/absmax, mode/antimode, count/unique/collapse/rand, prod, entropy, argmin/argmax, quantiles via q*/p*), or string helpers like sub(). Always prefix column references with `$`, including columns created earlier in the same invocation (e.g. `log_total=log2($total)`), and wrap each -e argument in single quotes so the shell leaves `$` selectors alone. You can also run in-place substitutions with sed-style syntax s/selectors/pattern/replacement/.
 
 Examples:
   tsvkit mutate -e "coverage_sum=sum($1,$3:$5)" examples/profiles.tsv
@@ -167,23 +168,12 @@ fn evaluate_function(func: &FunctionSpec, row: &[String]) -> Result<String> {
             Ok(evaluated.text.into_owned())
         }
         FunctionSpec::Aggregate { kind, columns } => {
-            let values = collect_numeric(row, columns);
-            if values.is_empty() {
-                return Ok(String::new());
-            }
-            let result = match kind {
-                AggregateKind::Sum => values.iter().sum::<f64>(),
-                AggregateKind::Mean => values.iter().sum::<f64>() / values.len() as f64,
-                AggregateKind::Sd => stddev(&values).unwrap_or(f64::NAN),
-                AggregateKind::Quantile { fraction } => {
-                    quantile(&values, *fraction).unwrap_or(f64::NAN)
-                }
-            };
-            if result.is_finite() {
-                Ok(format_number(result))
-            } else {
-                Ok(String::new())
-            }
+            let values = columns
+                .iter()
+                .map(|&idx| row.get(idx).map(|s| s.as_str()).unwrap_or(""))
+                .collect::<Vec<_>>();
+            let result = evaluate_row_aggregate(kind, &values);
+            Ok(result.text)
         }
         FunctionSpec::SubNew {
             column,
@@ -195,14 +185,6 @@ fn evaluate_function(func: &FunctionSpec, row: &[String]) -> Result<String> {
             Ok(replaced.into_owned())
         }
     }
-}
-
-fn collect_numeric(row: &[String], indices: &[usize]) -> Vec<f64> {
-    indices
-        .iter()
-        .filter_map(|&idx| row.get(idx))
-        .filter_map(|value| parse_float(value))
-        .collect()
 }
 
 fn parse_operations(
@@ -354,7 +336,7 @@ fn parse_function(value: &str, headers: &[String], no_header: bool) -> Result<Fu
 
     if let Some(open_idx) = trimmed.find('(') {
         let func_name = trimmed[..open_idx].trim();
-        if let Ok(kind) = parse_aggregate_kind(func_name) {
+        if let Some(kind) = try_parse_aggregate_kind(func_name)? {
             let inner = trimmed
                 .strip_prefix(&format!("{}(", func_name))
                 .and_then(|s| s.strip_suffix(')'))
@@ -467,122 +449,6 @@ fn parse_string_literal(value: &str) -> Result<String> {
     }
 }
 
-fn parse_aggregate_kind(name: &str) -> Result<AggregateKind> {
-    let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "sum" => Ok(AggregateKind::Sum),
-        "mean" | "avg" => Ok(AggregateKind::Mean),
-        "median" | "med" => Ok(AggregateKind::Quantile { fraction: 0.5 }),
-        "sd" | "std" | "stddev" => Ok(AggregateKind::Sd),
-        _ if lower.starts_with('q') => {
-            let fraction = parse_quantile_fraction(&lower)?;
-            Ok(AggregateKind::Quantile { fraction })
-        }
-        _ if lower.starts_with('p') => {
-            let fraction = parse_percent_fraction(&lower)?;
-            Ok(AggregateKind::Quantile { fraction })
-        }
-        other => bail!(
-            "unsupported function '{}': try sum, mean, median, sd, q*, or p*",
-            other
-        ),
-    }
-}
-
-fn parse_quantile_fraction(token: &str) -> Result<f64> {
-    let rest = &token[1..];
-    if rest.is_empty() {
-        bail!("quantile function must specify a value (e.g. q1 or q0.25)");
-    }
-    if rest.chars().all(|c| c.is_ascii_digit()) {
-        let int_val: u32 = rest.parse().with_context(|| "invalid quantile index")?;
-        if int_val <= 4 {
-            return Ok(int_val as f64 / 4.0);
-        } else if int_val <= 100 {
-            return Ok(int_val as f64 / 100.0);
-        } else {
-            bail!("quantile integer must be between 1 and 100");
-        }
-    }
-    let fractional = rest.replace('_', ".");
-    let value: f64 = fractional
-        .parse()
-        .with_context(|| "invalid quantile fraction")?;
-    if !(0.0..=1.0).contains(&value) {
-        bail!("quantile fraction must lie between 0 and 1");
-    }
-    Ok(value)
-}
-
-fn parse_percent_fraction(token: &str) -> Result<f64> {
-    let rest = &token[1..];
-    if rest.is_empty() {
-        bail!("percentile function must specify a value (e.g. p95)");
-    }
-    let value: f64 = rest
-        .replace('_', ".")
-        .parse()
-        .with_context(|| "invalid percentile value")?;
-    if !(0.0..=100.0).contains(&value) {
-        bail!("percentile value must be between 0 and 100");
-    }
-    Ok(value / 100.0)
-}
-
-fn stddev(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values
-        .iter()
-        .map(|v| {
-            let diff = v - mean;
-            diff * diff
-        })
-        .sum::<f64>()
-        / values.len() as f64;
-    Some(variance.max(0.0).sqrt())
-}
-
-fn quantile(values: &[f64], fraction: f64) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    if values.len() == 1 {
-        return Some(values[0]);
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let position = fraction.clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
-    let lower = position.floor() as usize;
-    let upper = position.ceil() as usize;
-    if lower == upper {
-        Some(sorted[lower])
-    } else {
-        let weight = position - lower as f64;
-        let lower_value = sorted[lower];
-        let upper_value = sorted[upper];
-        Some(lower_value + (upper_value - lower_value) * weight)
-    }
-}
-
-fn format_number(value: f64) -> String {
-    if value.fract() == 0.0 {
-        format!("{:.0}", value)
-    } else {
-        format!("{:.6}", value)
-    }
-}
-
-fn parse_float(text: &str) -> Option<f64> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    trimmed.parse::<f64>().ok()
-}
-
 #[derive(Debug)]
 enum MutateOp {
     Create {
@@ -612,29 +478,9 @@ enum FunctionSpec {
     },
 }
 
-#[derive(Debug)]
-enum AggregateKind {
-    Sum,
-    Mean,
-    Sd,
-    Quantile { fraction: f64 },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_quantile_aliases() {
-        assert!((parse_quantile_fraction("q1").unwrap() - 0.25).abs() < f64::EPSILON);
-        assert!((parse_quantile_fraction("q2").unwrap() - 0.5).abs() < f64::EPSILON);
-        assert!((parse_quantile_fraction("q75").unwrap() - 0.75).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn parse_percent_aliases() {
-        assert!((parse_percent_fraction("p95").unwrap() - 0.95).abs() < f64::EPSILON);
-    }
 
     #[test]
     fn split_args_handles_quotes() {
@@ -691,5 +537,36 @@ mod tests {
         assert_eq!(row[6], "5");
         let log_total: f64 = row[7].parse().unwrap();
         assert!((log_total - 5f64.log2()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn advanced_row_aggregators_work_across_ranges() {
+        let headers = vec![
+            "c1".to_string(),
+            "c2".to_string(),
+            "c3".to_string(),
+            "c4".to_string(),
+        ];
+        let ops = parse_operations(
+            &vec![
+                "sum_open=sum($c1:)".to_string(),
+                "count_all=count($c1:$c4)".to_string(),
+                "mode_val=mode($c1:$c4)".to_string(),
+            ],
+            &headers,
+            false,
+        )
+        .unwrap();
+        let mut row = vec![
+            "1".to_string(),
+            "2".to_string(),
+            "2".to_string(),
+            "".to_string(),
+        ];
+        process_row(&mut row, &ops).unwrap();
+        assert_eq!(row.len(), 7);
+        assert_eq!(row[4], "5");
+        assert_eq!(row[5], "4");
+        assert_eq!(row[6], "2");
     }
 }
