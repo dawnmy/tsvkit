@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::env;
 use std::io;
 
+mod aggregate;
 mod common;
 mod csv;
 mod cut;
