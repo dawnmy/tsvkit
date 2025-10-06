@@ -45,6 +45,7 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Pow,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +106,7 @@ enum Token {
     Minus,
     Star,
     Slash,
+    Caret,
 }
 
 pub fn parse_expression(input: &str) -> Result<Expr> {
@@ -320,6 +322,14 @@ where
                             empty_eval()
                         } else {
                             numeric_eval(a / b)
+                        }
+                    }
+                    BinaryOp::Pow => {
+                        let value = a.powf(b);
+                        if value.is_finite() {
+                            numeric_eval(value)
+                        } else {
+                            empty_eval()
                         }
                     }
                 },
@@ -623,6 +633,52 @@ mod tests {
         ];
         assert!(evaluate(&bound, &row));
     }
+
+    #[test]
+    fn subtraction_without_spaces_between_columns() {
+        let expr = parse_expression("($dna_ug-$rna_ug)>10").unwrap();
+        let headers = vec!["dna_ug".to_string(), "rna_ug".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec!["25.0".to_string(), "12.0".to_string()];
+        assert!(evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn subtraction_with_space_after_minus() {
+        let expr = parse_expression("($dna_ug- $rna_ug)>10").unwrap();
+        let headers = vec!["dna_ug".to_string(), "rna_ug".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec!["22.0".to_string(), "5.0".to_string()];
+        assert!(evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn exponentiation_operator_supported() {
+        let expr = parse_value_expression("$dna_ug^2").unwrap();
+        let headers = vec!["dna_ug".to_string()];
+        let bound = bind_value_expression(expr, &headers, false).unwrap();
+        let row = vec!["3".to_string()];
+        let eval = eval_value(&bound, &row);
+        assert_eq!(eval.numeric, Some(9.0));
+    }
+
+    #[test]
+    fn exponentiation_is_right_associative() {
+        let expr = parse_value_expression("2^3^2").unwrap();
+        let bound = bind_value_expression(expr, &[], false).unwrap();
+        let row: Vec<String> = Vec::new();
+        let eval = eval_value(&bound, &row);
+        assert_eq!(eval.numeric, Some(512.0));
+    }
+
+    #[test]
+    fn braces_allow_literal_column_names() {
+        let expr = parse_expression("${dna-}").unwrap();
+        let headers = vec!["dna-".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec!["value".to_string()];
+        assert!(evaluate(&bound, &row));
+    }
 }
 
 impl<'a> Lexer<'a> {
@@ -722,6 +778,10 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
                 Ok(Some(Token::Slash))
             }
+            b'^' => {
+                self.pos += 1;
+                Ok(Some(Token::Caret))
+            }
             c if c.is_ascii_digit() || c == b'.' => self.lex_number(),
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let ident = self.lex_identifier();
@@ -733,6 +793,28 @@ impl<'a> Lexer<'a> {
 
     fn lex_column(&mut self) -> Result<Option<Token>> {
         self.pos += 1;
+        if self.match_char(b'{') {
+            self.pos += 1;
+            let mut value = String::new();
+            let mut escaped = false;
+            while self.pos < self.chars.len() {
+                let c = self.chars[self.pos];
+                self.pos += 1;
+                if escaped {
+                    value.push(c as char);
+                    escaped = false;
+                    continue;
+                }
+                match c {
+                    b'\\' => escaped = true,
+                    b'}' => {
+                        return Ok(Some(Token::Column(ColumnSelector::Name(value))));
+                    }
+                    other => value.push(other as char),
+                }
+            }
+            bail!("unterminated '{{' in column selector");
+        }
         let start = self.pos;
         let mut is_numeric = true;
         let mut has_range_syntax = false;
@@ -761,6 +843,19 @@ impl<'a> Lexer<'a> {
             }
             if c == b'-' {
                 if is_numeric && self.pos > start {
+                    break;
+                }
+                let mut should_break = false;
+                if self.pos > start {
+                    if let Some(next) = self.peek_non_whitespace(1) {
+                        should_break = matches!(
+                            next,
+                            b'$' | b'(' | b')' | b'+' | b'-' | b'*' | b'/' | b'^' | b'"'
+                        ) || next.is_ascii_digit()
+                            || next == b'.';
+                    }
+                }
+                if should_break {
                     break;
                 }
                 is_numeric = false;
@@ -870,6 +965,18 @@ impl<'a> Lexer<'a> {
         self.chars.get(self.pos + offset).copied()
     }
 
+    fn peek_non_whitespace(&self, offset: usize) -> Option<u8> {
+        let mut idx = self.pos + offset;
+        while idx < self.chars.len() {
+            let c = self.chars[idx];
+            if !c.is_ascii_whitespace() {
+                return Some(c);
+            }
+            idx += 1;
+        }
+        None
+    }
+
     fn skip_whitespace(&mut self) {
         while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_whitespace() {
             self.pos += 1;
@@ -934,7 +1041,12 @@ impl Parser {
                 if let Some(next) = self.peek_token() {
                     if matches!(
                         next,
-                        Token::Compare(_) | Token::Plus | Token::Minus | Token::Star | Token::Slash
+                        Token::Compare(_)
+                            | Token::Plus
+                            | Token::Minus
+                            | Token::Star
+                            | Token::Slash
+                            | Token::Caret
                     ) {
                         self.pos = saved_pos;
                         return self.parse_comparison();
@@ -1013,19 +1125,29 @@ impl Parser {
     }
 
     fn parse_term(&mut self) -> Result<ValueExpr> {
-        let mut expr = self.parse_factor()?;
+        let mut expr = self.parse_power()?;
         loop {
             if self.match_token(TokenKind::Star) {
                 self.pos += 1;
-                let rhs = self.parse_factor()?;
+                let rhs = self.parse_power()?;
                 expr = ValueExpr::Binary(BinaryOp::Mul, Box::new(expr), Box::new(rhs));
             } else if self.match_token(TokenKind::Slash) {
                 self.pos += 1;
-                let rhs = self.parse_factor()?;
+                let rhs = self.parse_power()?;
                 expr = ValueExpr::Binary(BinaryOp::Div, Box::new(expr), Box::new(rhs));
             } else {
                 break;
             }
+        }
+        Ok(expr)
+    }
+
+    fn parse_power(&mut self) -> Result<ValueExpr> {
+        let mut expr = self.parse_factor()?;
+        if self.match_token(TokenKind::Caret) {
+            self.pos += 1;
+            let rhs = self.parse_power()?;
+            expr = ValueExpr::Binary(BinaryOp::Pow, Box::new(expr), Box::new(rhs));
         }
         Ok(expr)
     }
@@ -1134,6 +1256,7 @@ impl Parser {
             (TokenKind::Minus, Some(Token::Minus)) => true,
             (TokenKind::Star, Some(Token::Star)) => true,
             (TokenKind::Slash, Some(Token::Slash)) => true,
+            (TokenKind::Caret, Some(Token::Caret)) => true,
             _ => false,
         }
     }
@@ -1175,4 +1298,5 @@ enum TokenKind {
     Minus,
     Star,
     Slash,
+    Caret,
 }
