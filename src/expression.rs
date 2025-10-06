@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 
+use crate::aggregate::{AggregateKind, evaluate_row_aggregate, try_parse_aggregate_kind};
 use crate::common::{ColumnSelector, parse_selector_list, resolve_selectors};
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,13 @@ pub enum ValueExpr {
     Unary(UnaryOp, Box<ValueExpr>),
     Binary(BinaryOp, Box<ValueExpr>, Box<ValueExpr>),
     Function(FunctionName, Box<ValueExpr>),
+    Aggregate(AggregateSpecExpr),
+}
+
+#[derive(Debug, Clone)]
+pub struct AggregateSpecExpr {
+    pub kind: AggregateKind,
+    pub selectors: Vec<ColumnSelector>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -199,6 +207,13 @@ pub enum BoundValue {
     Unary(UnaryOp, Box<BoundValue>),
     Binary(BinaryOp, Box<BoundValue>, Box<BoundValue>),
     Function(FunctionName, Box<BoundValue>),
+    Aggregate(BoundAggregate),
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundAggregate {
+    pub kind: AggregateKind,
+    pub columns: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -337,6 +352,18 @@ where
                 empty_eval()
             }
         }
+        BoundValue::Aggregate(spec) => {
+            let values = spec
+                .columns
+                .iter()
+                .map(|&idx| row.get(idx).unwrap_or(""))
+                .collect::<Vec<_>>();
+            let result = evaluate_row_aggregate(&spec.kind, &values);
+            EvalValue {
+                text: Cow::Owned(result.text),
+                numeric: result.numeric,
+            }
+        }
     }
 }
 
@@ -443,6 +470,20 @@ fn bind_value(value: ValueExpr, headers: &[String], no_header: bool) -> Result<B
             } else {
                 Ok(BoundValue::Columns(indices))
             }
+        }
+        ValueExpr::Aggregate(spec) => {
+            let mut indices = Vec::new();
+            for selector in spec.selectors {
+                let mut resolved = resolve_selectors(headers, &[selector], no_header)?;
+                indices.append(&mut resolved);
+            }
+            if indices.is_empty() {
+                bail!("aggregate selector resolved to no columns");
+            }
+            Ok(BoundValue::Aggregate(BoundAggregate {
+                kind: spec.kind,
+                columns: indices,
+            }))
         }
         ValueExpr::String(text) => Ok(BoundValue::String(text)),
         ValueExpr::Number(number) => Ok(BoundValue::Number(number)),
@@ -883,10 +924,22 @@ impl Parser {
         ) {
             self.parse_regex_without_left()
         } else if self.match_token(TokenKind::LParen) {
+            let saved_pos = self.pos;
             self.pos += 1;
             let expr = self.parse_expr()?;
             if !self.consume_token(TokenKind::RParen) {
                 bail!("missing closing ')' in expression");
+            }
+            if matches!(expr, Expr::Value(_)) {
+                if let Some(next) = self.peek_token() {
+                    if matches!(
+                        next,
+                        Token::Compare(_) | Token::Plus | Token::Minus | Token::Star | Token::Slash
+                    ) {
+                        self.pos = saved_pos;
+                        return self.parse_comparison();
+                    }
+                }
             }
             Ok(expr)
         } else {
@@ -1028,6 +1081,20 @@ impl Parser {
                     let argument = self.parse_arith()?;
                     if !self.consume_token(TokenKind::RParen) {
                         bail!("missing ')' after function call");
+                    }
+                    if let Some(kind) = try_parse_aggregate_kind(&name)? {
+                        let selectors = match argument {
+                            ValueExpr::Column(selector) => vec![selector],
+                            ValueExpr::Columns(list) => list,
+                            other => {
+                                bail!(
+                                    "function '{}' expects column selectors, got {:?}",
+                                    name,
+                                    other
+                                )
+                            }
+                        };
+                        return Ok(ValueExpr::Aggregate(AggregateSpecExpr { kind, selectors }));
                     }
                     let func = FunctionName::from_ident(&name)?;
                     Ok(ValueExpr::Function(func, Box::new(argument)))

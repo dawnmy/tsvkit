@@ -220,6 +220,7 @@ tsvkit filter -e '$group == "case" & $purity >= 0.94' examples/samples.tsv
 | Comparisons | `$purity >= 0.9`, `$group != "control"` | Works on numeric or string data. |
 | Logical | `($purity >= 0.9) & ($group == "case")` | `&`, `|`, and `!` (or `and`, `or`, `not`). |
 | Numeric functions | `log2($total)`, `sqrt($reads)` | See [Expression language essentials](#expression-language-essentials). |
+| Row-wise aggregators | `sum($dna_ug:$rna_ug)`, `mode($1,$3)`, `countunique($gene:)` | Same catalog as [`summarize`](#summarize): totals, quantiles (`q*` / `p*`), variance/SD, products, entropy, argmin/argmax, membership stats. Works with ranges, lists, and open selectors. |
 | Regex match | `$tech ~ "sRNA"`, `$notes !~ "(?i)fail"` | Patterns follow Rust `regex` syntax. `(?i)` enables case-insensitive matching. |
 | Regex across ranges | `$gene:$notes ~ "kinase"`, `~ "control"` | When the left-hand side is omitted, `~` scans all columns. |
 
@@ -266,16 +267,18 @@ tsvkit mutate -e 's/$group/ctrl/control/' examples/samples.tsv
 | `existing=EXPR` | Overwrite an existing column with the expression result. | `purity=round($purity,2)` (via custom helper script) |
 | `s/$selectors/pattern/replacement/` | Regex substitution on one or more columns (`$` optional). | `s/$group/ctrl/control/` |
 
-**Row-wise aggregators available in `mutate` expressions**
+**Row-wise aggregators shared by `filter` and `mutate`**
 
 | Category | Functions (aliases) | Description |
 | -------- | ------------------- | ----------- |
-| Totals & averages | `sum`, `mean`/`avg` | Sum or average of the referenced columns. |
-| Robust center | `median`/`med` | Median of the referenced columns. |
-| Spread | `sd`/`std`/`stddev` | Sample standard deviation. |
-| Quantiles | `q1`, `q2`, `q3`, `q0.25`, `q0.9`, `p95`, etc. | Specify quartiles (`q1`, `q3`), fractions (`q0.25`), or percentiles (`p95`). |
+| Totals & centers | `sum`, `mean`/`avg`, `median`/`med`, `trimmean`, `iqr` | Numeric summaries that ignore blanks; `iqr` computes `q3 - q1`. |
+| Dispersion | `sd`/`std`/`stddev`, `var`/`variance`, `entropy` | Spread metrics and Shannon entropy of the value distribution. |
+| Extremes & positions | `min`, `max`, `absmin`, `absmax`, `argmin`, `argmax` | `arg*` return the 1-based position among numeric entries. |
+| Membership & counts | `count`, `first`, `last`, `rand`/`random`, `unique`, `collapse`, `countunique`/`distinct`, `mode`, `antimode` | Operate on the original strings (including duplicates and blanks). |
+| Products | `prod`/`product` | Multiply all numeric inputs (skips blanks and NaNs). |
+| Quantiles | `q*` (`q1`, `q0.9`, `q_0_25`), `p*` (`p95`, `p99.5`) | Fractions `0–1` and percents `0–100`; underscores may replace dots. |
 
-Aggregators accept any list or range of numeric columns (`sum($1,$3:$5)`). Non-numeric or empty cells are skipped. Results are appended as new columns unless you assign them back to an existing name.
+Aggregators accept any range, list, or open-ended selector (`sum($1,$3:)`). Non-numeric cells are skipped for numeric summaries. Results are appended as new columns unless you assign them back to an existing name.
 
 ### `summarize`
 Group rows and compute descriptive statistics. Without `-g/--group`, the entire table is treated as a single group.
@@ -365,6 +368,9 @@ Render aligned, boxed output for quick inspection.
 ```bash
 tsvkit filter -e '$group == "case"' examples/samples.tsv | tsvkit pretty
 ```
+
+- `--round DIGITS` (or `-r`) rounds numeric cells to the requested precision. Tiny magnitudes automatically switch to scientific
+  notation so columns stay legible even when values approach zero.
 
 ### `excel`
 Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new workbooks from TSV inputs. Unless `-H/--no-header` is supplied, the first row of each sheet is treated as the header row; use that flag when you need to preview or export raw rows.
