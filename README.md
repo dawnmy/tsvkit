@@ -124,6 +124,8 @@ Selectors are reused in `cut`, `filter`, `join`, `mutate`, `summarize`, and othe
 | `multi-file` | Separate selectors for each input with semicolons (primarily `join`). | `sample_id;subject_id` |
 | `range in expressions` | Prefixed with `$` to access a slice of values. | `$IL6:$IL10` |
 
+> Wrap selectors in backticks to treat punctuation literally. For example, ``-f '`IL6:IL10`,`total,reads`'`` selects columns named `IL6:IL10` and `total,reads` instead of expanding a range or splitting on the comma.
+
 Anywhere you access column *values* inside an expression, prefix the selector with `$` (`$purity`, `$1`, `$IL6:$IL10`).
 
 ### Streaming and file handling
@@ -140,13 +142,15 @@ The same expression language powers `filter -e`, `mutate -e name=EXPR`, and rege
 
 | Symbol / keyword | Description | Works on |
 | ---------------- | ----------- | -------- |
-| `+ - * /` | Arithmetic operators. | Numbers |
+| `+ - * / ^` | Arithmetic operators (`^` is exponentiation, right-associative). | Numbers |
 | `== != < <= > >=` | Comparisons. | Numbers or strings |
 | `&` / `and` | Logical AND. | Booleans |
 | `|` / `or` | Logical OR. | Booleans |
 | `!` / `not` | Logical negation. | Booleans |
 | `~` | Regex match. Right-hand side can be literal text or a `$range`. | Strings |
 | `!~` | Regex does *not* match. | Strings |
+
+> Reference columns whose names contain operators or punctuation with `${column-name}` inside expressions (e.g. `${dna-} - $rna_ug`). This prevents the parser from treating the characters as arithmetic.
 
 **Numeric helper functions**
 
