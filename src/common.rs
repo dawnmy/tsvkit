@@ -207,6 +207,21 @@ pub fn should_skip_record(
     false
 }
 
+pub fn inconsistent_width_error(
+    source: &str,
+    row_number: usize,
+    expected: usize,
+    actual: usize,
+) -> anyhow::Error {
+    anyhow!(
+        "rows in {} have inconsistent column counts at row {} (expected {}, got {})",
+        source,
+        row_number,
+        expected,
+        actual,
+    )
+}
+
 pub fn default_headers(len: usize) -> Vec<String> {
     (1..=len).map(|i| format!("col{}", i)).collect()
 }

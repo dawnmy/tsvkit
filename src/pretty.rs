@@ -1,11 +1,11 @@
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::aggregate::parse_float;
-use crate::common::{InputOptions, reader_for_path, should_skip_record};
+use crate::common::{InputOptions, inconsistent_width_error, reader_for_path, should_skip_record};
 
 #[derive(Args, Debug)]
 #[command(
@@ -50,6 +50,7 @@ pub fn run(args: PrettyArgs) -> Result<()> {
         args.ignore_illegal_row,
     )?;
     let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
+    let source_name = format!("\"{}\"", args.file.display());
 
     let header = if args.no_header {
         None
@@ -66,14 +67,22 @@ pub fn run(args: PrettyArgs) -> Result<()> {
 
     let mut rows = Vec::new();
     let mut reference_width = header.as_ref().map(|h| h.len());
+    let header_rows = header.as_ref().map(|_| 1).unwrap_or(0);
+    let mut row_number = 0usize;
     for record in reader.records() {
         let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+        row_number += 1;
         if let Some(width) = reference_width {
             if record.len() != width {
                 if input_opts.ignore_illegal {
                     continue;
                 } else {
-                    bail!("rows in {:?} have inconsistent column counts", args.file);
+                    return Err(inconsistent_width_error(
+                        &source_name,
+                        row_number + header_rows,
+                        width,
+                        record.len(),
+                    ));
                 }
             }
         }

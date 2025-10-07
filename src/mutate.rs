@@ -371,10 +371,10 @@ fn parse_substitution_expression(
     let content = content
         .strip_suffix('/')
         .with_context(|| "substitution expression must end with '/'")?;
-    let (selector_part, pattern_part, replacement_part) =
-        split_substitution_components(content).with_context(|| {
-            "substitution expression must use s/selectors/pattern/replacement/ syntax"
-        })?;
+    let (selector_part, pattern_part, replacement_part) = split_substitution_components(content)
+        .with_context(
+            || "substitution expression must use s/selectors/pattern/replacement/ syntax",
+        )?;
 
     let selectors = parse_selector_list(&normalize_selector_spec(selector_part.trim()))?;
     if selectors.is_empty() {
@@ -630,12 +630,7 @@ mod tests {
     #[test]
     fn substitution_replacement_supports_escape_sequences() {
         let headers = vec!["col1".to_string()];
-        let ops = parse_operations(
-            &vec!["s/$col1/\\t/ /".to_string()],
-            &headers,
-            false,
-        )
-        .unwrap();
+        let ops = parse_operations(&vec!["s/$col1/\\t/ /".to_string()], &headers, false).unwrap();
 
         let mut row = vec!["field\tvalue".to_string()];
         process_row(&mut row, &ops).unwrap();

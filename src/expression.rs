@@ -408,8 +408,20 @@ where
     let right = eval_value(rhs, row);
 
     match op {
-        CompareOp::Eq => left.text == right.text,
-        CompareOp::Ne => left.text != right.text,
+        CompareOp::Eq => {
+            if let (Some(a), Some(b)) = (left.numeric, right.numeric) {
+                a == b
+            } else {
+                left.text == right.text
+            }
+        }
+        CompareOp::Ne => {
+            if let (Some(a), Some(b)) = (left.numeric, right.numeric) {
+                a != b
+            } else {
+                left.text != right.text
+            }
+        }
         CompareOp::Gt => compare_numeric(&left, &right, |a, b| a > b),
         CompareOp::Ge => compare_numeric(&left, &right, |a, b| a >= b),
         CompareOp::Lt => compare_numeric(&left, &right, |a, b| a < b),
@@ -634,6 +646,24 @@ mod tests {
             "mRNA".to_string(),
         ];
         assert!(evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn numeric_equality_uses_numeric_comparison() {
+        let expr = parse_expression("$1 == 0").unwrap();
+        let headers = vec!["value".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let record = csv::StringRecord::from(vec!["0.0"]);
+        assert!(evaluate(&bound, &record));
+    }
+
+    #[test]
+    fn string_equality_remains_textual_when_not_numeric() {
+        let expr = parse_expression("$1 == 0").unwrap();
+        let headers = vec!["value".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let record = csv::StringRecord::from(vec!["00a"]);
+        assert!(!evaluate(&bound, &record));
     }
 
     #[test]
@@ -1326,4 +1356,3 @@ enum TokenKind {
     Slash,
     Caret,
 }
-
