@@ -482,13 +482,19 @@ fn parse_string_literal(value: &str) -> Result<String> {
         while let Some(ch) = chars.next() {
             if ch == '\\' {
                 if let Some(next) = chars.next() {
-                    result.push(match next {
-                        'n' => '\n',
-                        't' => '\t',
-                        '"' => '"',
-                        '\\' => '\\',
-                        other => other,
-                    });
+                    match next {
+                        'n' => result.push('\n'),
+                        'r' => result.push('\r'),
+                        't' => result.push('\t'),
+                        '"' => result.push('"'),
+                        '\\' => result.push('\\'),
+                        other => {
+                            result.push('\\');
+                            result.push(other);
+                        }
+                    }
+                } else {
+                    result.push('\\');
                 }
             } else {
                 result.push(ch);
@@ -649,5 +655,17 @@ mod tests {
         let mut row = vec!["foo/bar".to_string()];
         process_row(&mut row, &ops).unwrap();
         assert_eq!(row[0], "hello/world");
+    }
+
+    #[test]
+    fn parse_string_literal_preserves_regex_escapes() {
+        let literal = parse_string_literal("\"\\\\.\\\\*\"").unwrap();
+        assert_eq!(literal, "\\.\\*");
+    }
+
+    #[test]
+    fn parse_string_literal_handles_common_escapes() {
+        let literal = parse_string_literal("\"line\\nfeed\\tend\"").unwrap();
+        assert_eq!(literal, "line\nfeed\tend");
     }
 }

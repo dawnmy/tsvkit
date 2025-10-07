@@ -681,6 +681,24 @@ mod tests {
         let row = vec!["value".to_string()];
         assert!(evaluate(&bound, &row));
     }
+
+    #[test]
+    fn value_expression_supports_common_escape_sequences() {
+        let expr = parse_value_expression("\"line\\nfeed\\tend\"").unwrap();
+        match expr {
+            ValueExpr::String(text) => assert_eq!(text, "line\nfeed\tend"),
+            other => panic!("expected string literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn value_expression_preserves_unknown_escape_sequences() {
+        let expr = parse_value_expression("\"\\\\.\\\\|\\\\(\\\\)\"").unwrap();
+        match expr {
+            ValueExpr::String(text) => assert_eq!(text, "\\.\\|\\(\\)"),
+            other => panic!("expected string literal, got {:?}", other),
+        }
+    }
 }
 
 impl<'a> Lexer<'a> {
@@ -896,7 +914,18 @@ impl<'a> Lexer<'a> {
                     if self.pos >= self.chars.len() {
                         bail!("unterminated escape sequence in string literal");
                     }
-                    value.push(self.chars[self.pos] as char);
+                    let escaped = self.chars[self.pos];
+                    match escaped {
+                        b'"' => value.push('"'),
+                        b'\\' => value.push('\\'),
+                        b'n' => value.push('\n'),
+                        b'r' => value.push('\r'),
+                        b't' => value.push('\t'),
+                        other => {
+                            value.push('\\');
+                            value.push(other as char);
+                        }
+                    }
                 }
                 b'"' => {
                     self.pos += 1;
@@ -1297,3 +1326,4 @@ enum TokenKind {
     Slash,
     Caret,
 }
+
