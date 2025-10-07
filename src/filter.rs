@@ -189,4 +189,26 @@ mod tests {
         let record = StringRecord::from(vec!["4", "3"]);
         assert!(evaluate(&bound, &record));
     }
+
+    #[test]
+    fn regex_literal_escape_preserved_for_special_characters() {
+        let expr = parse_expression("$1 ~ \"\\\\.\"").unwrap();
+        let headers = vec!["col1".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let matching = StringRecord::from(vec!["value.with.dot"]);
+        let non_matching = StringRecord::from(vec!["value without dot"]);
+        assert!(evaluate(&bound, &matching));
+        assert!(!evaluate(&bound, &non_matching));
+    }
+
+    #[test]
+    fn regex_literal_escape_handles_vertical_bar() {
+        let expr = parse_expression("$1 ~ \"\\\\|\"").unwrap();
+        let headers = vec!["col1".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let matching = StringRecord::from(vec!["left|right"]);
+        let non_matching = StringRecord::from(vec!["left/right"]);
+        assert!(evaluate(&bound, &matching));
+        assert!(!evaluate(&bound, &non_matching));
+    }
 }
