@@ -371,32 +371,83 @@ fn parse_substitution_expression(
     let content = content
         .strip_suffix('/')
         .with_context(|| "substitution expression must end with '/'")?;
-    let mut parts = content.splitn(3, '/');
-    let selector_part = parts
-        .next()
-        .with_context(|| "missing selector list in substitution expression")?;
-    let pattern_part = parts
-        .next()
-        .with_context(|| "missing pattern in substitution expression")?;
-    let replacement_part = parts
-        .next()
-        .with_context(|| "missing replacement in substitution expression")?;
+    let (selector_part, pattern_part, replacement_part) =
+        split_substitution_components(content).with_context(|| {
+            "substitution expression must use s/selectors/pattern/replacement/ syntax"
+        })?;
 
-    let selectors = parse_selector_list(&normalize_selector_spec(selector_part))?;
+    let selectors = parse_selector_list(&normalize_selector_spec(selector_part.trim()))?;
     if selectors.is_empty() {
         bail!("substitution requires at least one target column");
     }
     let indices = resolve_selectors(headers, &selectors, no_header)?;
-    let regex = Regex::new(pattern_part).with_context(|| "invalid regex in substitution")?;
+    let regex_pattern = unescape_substitution_component(pattern_part);
+    let regex = Regex::new(&regex_pattern).with_context(|| "invalid regex in substitution")?;
     Ok(MutateOp::Substitute {
         columns: indices,
         pattern: regex,
-        replacement: replacement_part.to_string(),
+        replacement: unescape_substitution_component(replacement_part),
     })
 }
 
 fn normalize_selector_spec(spec: &str) -> String {
     spec.replace('$', "")
+}
+
+fn split_substitution_components(content: &str) -> Option<(&str, &str, &str)> {
+    let mut split_points = Vec::with_capacity(2);
+    let mut escaped = false;
+
+    for (idx, ch) in content.char_indices() {
+        if ch == '/' && !escaped {
+            split_points.push(idx);
+            if split_points.len() == 2 {
+                break;
+            }
+        }
+
+        if ch == '\\' && !escaped {
+            escaped = true;
+        } else {
+            escaped = false;
+        }
+    }
+
+    if split_points.len() != 2 {
+        return None;
+    }
+
+    let first = &content[..split_points[0]];
+    let second = &content[split_points[0] + 1..split_points[1]];
+    let third = &content[split_points[1] + 1..];
+    Some((first, second, third))
+}
+
+fn unescape_substitution_component(raw: &str) -> String {
+    let mut result = String::new();
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                match next {
+                    'n' => result.push('\n'),
+                    'r' => result.push('\r'),
+                    't' => result.push('\t'),
+                    '\\' => result.push('\\'),
+                    '/' => result.push('/'),
+                    _ => {
+                        result.push('\\');
+                        result.push(next);
+                    }
+                }
+            } else {
+                result.push('\\');
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 fn split_args(input: &str) -> Vec<String> {
@@ -568,5 +619,35 @@ mod tests {
         assert_eq!(row[4], "5");
         assert_eq!(row[5], "4");
         assert_eq!(row[6], "2");
+    }
+
+    #[test]
+    fn substitution_replacement_supports_escape_sequences() {
+        let headers = vec!["col1".to_string()];
+        let ops = parse_operations(
+            &vec!["s/$col1/\\t/ /".to_string()],
+            &headers,
+            false,
+        )
+        .unwrap();
+
+        let mut row = vec!["field\tvalue".to_string()];
+        process_row(&mut row, &ops).unwrap();
+        assert_eq!(row[0], "field value");
+    }
+
+    #[test]
+    fn substitution_allows_escaped_slashes() {
+        let headers = vec!["col1".to_string()];
+        let ops = parse_operations(
+            &vec![r"s/$col1/foo\/bar/hello\/world/".to_string()],
+            &headers,
+            false,
+        )
+        .unwrap();
+
+        let mut row = vec!["foo/bar".to_string()];
+        process_row(&mut row, &ops).unwrap();
+        assert_eq!(row[0], "hello/world");
     }
 }
