@@ -580,17 +580,6 @@ pub fn evaluate_truthy_with_context<'a, R>(
 where
     R: RowAccessor + ?Sized,
 {
-    let mut ctx = EvalContext::new(row);
-    evaluate_truthy_with_context(value, &mut ctx)
-}
-
-pub fn evaluate_truthy_with_context<'a, R>(
-    value: &'a BoundValue,
-    ctx: &mut EvalContext<'a, R>,
-) -> bool
-where
-    R: RowAccessor + ?Sized,
-{
     match value {
         BoundValue::Columns(indices) => indices.iter().any(|idx| {
             ctx.row()
@@ -607,6 +596,14 @@ where
             }
         }
     }
+}
+
+pub fn evaluate_truthy<'a, R>(value: &'a BoundValue, row: &'a R) -> bool
+where
+    R: RowAccessor + ?Sized,
+{
+    let mut ctx = EvalContext::new(row);
+    evaluate_truthy_with_context(value, &mut ctx)
 }
 
 fn evaluate_compare<'a, R>(
@@ -931,6 +928,19 @@ mod tests {
         let bound = bind_expression(expr, &headers, false).unwrap();
         let record = csv::StringRecord::from(vec!["0.0"]);
         assert!(evaluate(&bound, &record));
+    }
+
+    #[test]
+    fn evaluate_truthy_prefers_numeric_semantics_when_available() {
+        let value_expr = parse_value_expression("$1").unwrap();
+        let headers = vec!["value".to_string()];
+        let bound = bind_value_expression(value_expr, &headers, false).unwrap();
+
+        let truthy_row = vec!["5".to_string()];
+        assert!(evaluate_truthy(&bound, &truthy_row));
+
+        let falsy_row = vec!["0".to_string()];
+        assert!(!evaluate_truthy(&bound, &falsy_row));
     }
 
     #[test]
