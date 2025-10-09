@@ -7,12 +7,28 @@ use csv::ReaderBuilder;
 use flate2::read::MultiGzDecoder;
 use xz2::read::XzDecoder;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialColumn {
+    FilePath,
+    FileBase,
+}
+
+impl SpecialColumn {
+    pub fn default_header(self) -> &'static str {
+        match self {
+            SpecialColumn::FilePath => "__file__",
+            SpecialColumn::FileBase => "__base__",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ColumnSelector {
     Index(usize),
     FromEnd(usize),
     Name(String),
     Range(Option<Box<ColumnSelector>>, Option<Box<ColumnSelector>>),
+    Special(SpecialColumn),
 }
 
 pub fn parse_selector_list(spec: &str) -> Result<Vec<ColumnSelector>> {
@@ -86,6 +102,12 @@ pub fn resolve_selectors(
     let mut indices = Vec::with_capacity(selectors.len());
     for selector in selectors {
         match selector {
+            ColumnSelector::Special(special) => {
+                bail!(
+                    "special column '{}' cannot be resolved as a positional index",
+                    special.default_header()
+                );
+            }
             ColumnSelector::Index(_) | ColumnSelector::FromEnd(_) | ColumnSelector::Name(_) => {
                 let index = resolve_selector_index(headers, selector, no_header)?;
                 indices.push(index);
@@ -265,6 +287,11 @@ fn parse_simple_selector(token: &str) -> Result<ColumnSelector> {
     }
     if let Some(literal) = parse_brace_literal(token)? {
         return Ok(ColumnSelector::Name(literal));
+    }
+    match token {
+        "__file__" => return Ok(ColumnSelector::Special(SpecialColumn::FilePath)),
+        "__base__" => return Ok(ColumnSelector::Special(SpecialColumn::FileBase)),
+        _ => {}
     }
     if let Some(stripped) = token.strip_prefix('-') {
         if stripped.is_empty() {
@@ -535,6 +562,10 @@ fn resolve_selector_index(
                 .with_context(|| format!("column '{}' not found", name))?;
             Ok(index)
         }
+        ColumnSelector::Special(special) => bail!(
+            "special column '{}' not supported without column injection",
+            special.default_header()
+        ),
         ColumnSelector::Range(_, _) => {
             bail!("unexpected nested column range")
         }
@@ -543,7 +574,10 @@ fn resolve_selector_index(
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnSelector, parse_selector_list, parse_single_selector, resolve_selectors};
+    use super::{
+        ColumnSelector, SpecialColumn, parse_selector_list, parse_single_selector,
+        resolve_selectors,
+    };
 
     #[test]
     fn resolves_name_range() {
@@ -656,5 +690,16 @@ mod tests {
     fn rejects_unterminated_backtick() {
         let err = parse_selector_list("`foo").unwrap_err();
         assert!(err.to_string().contains("unterminated backtick"));
+    }
+
+    #[test]
+    fn distinguishes_injected_and_literal_file_columns() {
+        let selectors = parse_selector_list("__file__,{__file__},`__base__`").unwrap();
+        assert!(matches!(
+            selectors[0],
+            ColumnSelector::Special(SpecialColumn::FilePath)
+        ));
+        assert!(matches!(selectors[1], ColumnSelector::Name(ref name) if name == "__file__"));
+        assert!(matches!(selectors[2], ColumnSelector::Name(ref name) if name == "__base__"));
     }
 }
