@@ -653,6 +653,14 @@ mod tests {
     }
 
     #[test]
+    fn case_when_expression_parses_with_named_columns() {
+        let headers = vec!["sample_id".to_string()];
+        let expr = "label = case_when(\n        re($sample_id, \"^ERR(\\\\d+)$\") -> $1,\n        _                         -> $sample_id\n      )";
+        let ops = parse_operations(&[expr.to_string()], &headers, false).unwrap();
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
     fn parse_string_literal_preserves_regex_escapes() {
         let literal = parse_string_literal("\"\\\\.\\\\*\"").unwrap();
         assert_eq!(literal, "\\.\\*");
