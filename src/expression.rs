@@ -580,6 +580,17 @@ pub fn evaluate_truthy_with_context<'a, R>(
 where
     R: RowAccessor + ?Sized,
 {
+    let mut ctx = EvalContext::new(row);
+    evaluate_truthy_with_context(value, &mut ctx)
+}
+
+pub fn evaluate_truthy_with_context<'a, R>(
+    value: &'a BoundValue,
+    ctx: &mut EvalContext<'a, R>,
+) -> bool
+where
+    R: RowAccessor + ?Sized,
+{
     match value {
         BoundValue::Columns(indices) => indices.iter().any(|idx| {
             ctx.row()
