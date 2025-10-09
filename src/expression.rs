@@ -598,6 +598,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 pub fn evaluate_truthy<'a, R>(value: &'a BoundValue, row: &'a R) -> bool
 where
     R: RowAccessor + ?Sized,
