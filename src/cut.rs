@@ -15,9 +15,9 @@ use crate::common::{
     long_about = "Pick columns by name or 1-based index. Combine comma-separated selectors with ranges (colA:colD or 2:6) and single fields in one spec. Defaults to header-aware mode; add -H for headerless input.\n\nExamples:\n  tsvkit cut -f id,sample3,sample1 examples/profiles.tsv\n  tsvkit cut -f 'Purity,sample:FN,F1' examples/profiles.tsv\n  tsvkit cut -H -f 3,1 data.tsv"
 )]
 pub struct CutArgs {
-    /// Input TSV file (use '-' for stdin; supports gz/xz)
-    #[arg(value_name = "FILE", default_value = "-")]
-    pub file: PathBuf,
+    /// Input TSV file(s) (use '-' for stdin; supports gz/xz)
+    #[arg(value_name = "FILES", num_args = 0.., default_values = ["-"])]
+    pub files: Vec<PathBuf>,
 
     /// Fields to select, using names, 1-based indices, ranges (`colA:colD`, `2:5`), or mixes. Comma-separated list.
     #[arg(short = 'f', long = "fields", value_name = "COLS", required = true)]
@@ -56,48 +56,97 @@ pub fn run(args: CutArgs) -> Result<()> {
         args.ignore_empty_row,
         args.ignore_illegal_row,
     )?;
-    let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
     let mut writer = BufWriter::new(io::stdout().lock());
 
-    let file_info = FileInfo::from_path(&args.file);
     let file_column_config = FileColumnConfig::new(args.file_col.as_deref());
+    let mut header_emitted = false;
 
-    if args.no_header {
-        let mut records = reader.records();
-        let first_record = loop {
-            match records.next() {
-                Some(record) => {
-                    let record =
-                        record.with_context(|| format!("failed reading from {:?}", args.file))?;
-                    if should_skip_record(&record, &input_opts, None) {
-                        continue;
-                    }
-                    break record;
-                }
-                None => return Ok(()),
-            }
-        };
-        let expected_width = first_record.len();
-        let headers = default_headers(expected_width);
-        let columns = build_cut_columns(&headers, &selectors, true)?;
-        emit_record(&first_record, &columns, &file_info, &mut writer)?;
-        for record in records {
-            let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
-            if should_skip_record(&record, &input_opts, Some(expected_width)) {
-                continue;
-            }
-            emit_record(&record, &columns, &file_info, &mut writer)?;
+    for path in &args.files {
+        let mut reader = reader_for_path(path, args.no_header, &input_opts)?;
+        let file_info = FileInfo::from_path(path);
+
+        if args.no_header {
+            process_no_header_file(
+                &mut reader,
+                path,
+                &selectors,
+                &file_info,
+                &input_opts,
+                &mut writer,
+            )?;
+        } else {
+            process_header_file(
+                &mut reader,
+                path,
+                &selectors,
+                &file_info,
+                &file_column_config,
+                &input_opts,
+                &mut writer,
+                &mut header_emitted,
+            )?;
         }
-    } else {
-        let headers = reader
-            .headers()
-            .with_context(|| format!("failed reading header from {:?}", args.file))?
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-        let columns = build_cut_columns(&headers, &selectors, false)?;
-        let expected_width = headers.len();
+    }
 
+    writer.flush()?;
+    Ok(())
+}
+
+fn process_no_header_file(
+    reader: &mut csv::Reader<Box<dyn io::Read>>,
+    path: &Path,
+    selectors: &[ColumnSelector],
+    file_info: &FileInfo,
+    input_opts: &InputOptions,
+    writer: &mut BufWriter<io::StdoutLock<'_>>,
+) -> Result<()> {
+    let mut records = reader.records();
+    let first_record = loop {
+        match records.next() {
+            Some(record) => {
+                let record = record.with_context(|| format!("failed reading from {:?}", path))?;
+                if should_skip_record(&record, input_opts, None) {
+                    continue;
+                }
+                break record;
+            }
+            None => return Ok(()),
+        }
+    };
+    let expected_width = first_record.len();
+    let headers = default_headers(expected_width);
+    let columns = build_cut_columns(&headers, selectors, true)?;
+    emit_record(&first_record, &columns, file_info, writer)?;
+    for record in records {
+        let record = record.with_context(|| format!("failed reading from {:?}", path))?;
+        if should_skip_record(&record, input_opts, Some(expected_width)) {
+            continue;
+        }
+        emit_record(&record, &columns, file_info, writer)?;
+    }
+    Ok(())
+}
+
+fn process_header_file(
+    reader: &mut csv::Reader<Box<dyn io::Read>>,
+    path: &Path,
+    selectors: &[ColumnSelector],
+    file_info: &FileInfo,
+    file_column_config: &FileColumnConfig,
+    input_opts: &InputOptions,
+    writer: &mut BufWriter<io::StdoutLock<'_>>,
+    header_emitted: &mut bool,
+) -> Result<()> {
+    let headers = reader
+        .headers()
+        .with_context(|| format!("failed reading header from {:?}", path))?
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    let columns = build_cut_columns(&headers, selectors, false)?;
+    let expected_width = headers.len();
+
+    if !*header_emitted {
         let header_fields: Vec<String> = columns
             .iter()
             .map(|column| match column {
@@ -112,17 +161,16 @@ pub fn run(args: CutArgs) -> Result<()> {
         if !header_fields.is_empty() {
             writeln!(writer, "{}", header_fields.join("\t"))?;
         }
-
-        for record in reader.records() {
-            let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
-            if should_skip_record(&record, &input_opts, Some(expected_width)) {
-                continue;
-            }
-            emit_record(&record, &columns, &file_info, &mut writer)?;
-        }
+        *header_emitted = true;
     }
 
-    writer.flush()?;
+    for record in reader.records() {
+        let record = record.with_context(|| format!("failed reading from {:?}", path))?;
+        if should_skip_record(&record, input_opts, Some(expected_width)) {
+            continue;
+        }
+        emit_record(&record, &columns, file_info, writer)?;
+    }
     Ok(())
 }
 
