@@ -1033,6 +1033,23 @@ mod tests {
     }
 
     #[test]
+    fn case_when_with_named_columns_and_regex_capture() {
+        let source = "case_when(\n        re($sample_id, \"^ERR(\\\\d+)$\") -> $1,\n        re($sample_id, \"^SRR\")       -> \"SRA\",\n        _                         -> $sample_id\n      )";
+        let expr = parse_value_expression(source).unwrap();
+        let headers = vec!["sample_id".to_string()];
+        let bound = bind_value_expression(expr, &headers, false).unwrap();
+
+        let row_err = vec!["ERR1234".to_string()];
+        assert_eq!(eval_value(&bound, &row_err).text.as_ref(), "1234");
+
+        let row_srr = vec!["SRR9000".to_string()];
+        assert_eq!(eval_value(&bound, &row_srr).text.as_ref(), "SRA");
+
+        let row_other = vec!["OTHER".to_string()];
+        assert_eq!(eval_value(&bound, &row_other).text.as_ref(), "OTHER");
+    }
+
+    #[test]
     fn switch_maps_values_to_labels() {
         let value_expr = parse_value_expression(
             "switch($1, [\"DE\",\"FR\"] -> \"EU\", [\"US\",\"CA\"] -> \"NA\", _ -> \"Other\")",
@@ -1227,7 +1244,7 @@ impl<'a> Lexer<'a> {
                     }
                     let next = self.chars.get(idx).copied();
                     let is_selector_start = next.map_or(false, |next_char| {
-                        if next_char == b'$' || next_char == b'{' {
+                        if matches!(next_char, b'$' | b'{') {
                             return true;
                         }
                         if next_char == b'_' {
@@ -1241,7 +1258,20 @@ impl<'a> Lexer<'a> {
                                 return false;
                             }
                         }
-                        next_char.is_ascii_alphanumeric() || next_char == b'_' || next_char == b'.'
+                        if next_char == b'-' {
+                            let mut lookahead = idx + 1;
+                            while lookahead < self.chars.len()
+                                && self.chars[lookahead].is_ascii_whitespace()
+                            {
+                                lookahead += 1;
+                            }
+                            if lookahead < self.chars.len() {
+                                let following = self.chars[lookahead];
+                                return matches!(following, b'$' | b'{' | b'0'..=b'9');
+                            }
+                            return false;
+                        }
+                        next_char.is_ascii_digit()
                     });
                     if is_selector_start {
                         has_range_syntax = true;
