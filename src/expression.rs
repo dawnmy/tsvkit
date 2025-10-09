@@ -573,7 +573,10 @@ where
     }
 }
 
-pub fn evaluate_truthy<R>(value: &BoundValue, row: &R) -> bool
+pub fn evaluate_truthy_with_context<'a, R>(
+    value: &'a BoundValue,
+    ctx: &mut EvalContext<'a, R>,
+) -> bool
 where
     R: RowAccessor + ?Sized,
 {
@@ -1050,6 +1053,12 @@ mod tests {
     }
 
     #[test]
+    fn case_when_with_column_result_followed_by_column_condition() {
+        let source = "case_when($score < 0 -> \"neg\", is_na($score) -> $score, $score < 50 -> \"low\", _ -> \"high\")";
+        parse_value_expression(source).unwrap();
+    }
+
+    #[test]
     fn switch_maps_values_to_labels() {
         let value_expr = parse_value_expression(
             "switch($1, [\"DE\",\"FR\"] -> \"EU\", [\"US\",\"CA\"] -> \"NA\", _ -> \"Other\")",
@@ -1238,42 +1247,7 @@ impl<'a> Lexer<'a> {
             }
             if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b',' | b':') {
                 if c == b',' {
-                    let mut idx = self.pos + 1;
-                    while idx < self.chars.len() && self.chars[idx].is_ascii_whitespace() {
-                        idx += 1;
-                    }
-                    let next = self.chars.get(idx).copied();
-                    let is_selector_start = next.map_or(false, |next_char| {
-                        if matches!(next_char, b'$' | b'{') {
-                            return true;
-                        }
-                        if next_char == b'_' {
-                            let mut lookahead = idx + 1;
-                            while lookahead < self.chars.len()
-                                && self.chars[lookahead].is_ascii_whitespace()
-                            {
-                                lookahead += 1;
-                            }
-                            if lookahead < self.chars.len() && self.chars[lookahead] == b'-' {
-                                return false;
-                            }
-                        }
-                        if next_char == b'-' {
-                            let mut lookahead = idx + 1;
-                            while lookahead < self.chars.len()
-                                && self.chars[lookahead].is_ascii_whitespace()
-                            {
-                                lookahead += 1;
-                            }
-                            if lookahead < self.chars.len() {
-                                let following = self.chars[lookahead];
-                                return matches!(following, b'$' | b'{' | b'0'..=b'9');
-                            }
-                            return false;
-                        }
-                        next_char.is_ascii_digit()
-                    });
-                    if is_selector_start {
+                    if self.should_continue_selector_list(self.pos) {
                         has_range_syntax = true;
                         is_numeric = false;
                         self.pos += 1;
@@ -1433,6 +1407,141 @@ impl<'a> Lexer<'a> {
             idx += 1;
         }
         None
+    }
+
+    fn should_continue_selector_list(&self, comma_pos: usize) -> bool {
+        let mut idx = comma_pos + 1;
+        while idx < self.chars.len() && self.chars[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= self.chars.len() {
+            return false;
+        }
+        let start = self.chars[idx];
+        if start == b'_' {
+            return false;
+        }
+        let Some(end) = self.selector_end(idx) else {
+            return false;
+        };
+        if self.branch_arrow_ahead(end) {
+            return false;
+        }
+        true
+    }
+
+    fn selector_end(&self, start: usize) -> Option<usize> {
+        let len = self.chars.len();
+        if start >= len {
+            return None;
+        }
+        let mut pos = start;
+        match self.chars[pos] {
+            b'$' => {
+                pos += 1;
+                if pos < len && self.chars[pos] == b'{' {
+                    pos += 1;
+                    let mut escaped = false;
+                    while pos < len {
+                        let c = self.chars[pos];
+                        if escaped {
+                            escaped = false;
+                        } else if c == b'\\' {
+                            escaped = true;
+                        } else if c == b'}' {
+                            pos += 1;
+                            break;
+                        }
+                        pos += 1;
+                    }
+                } else {
+                    while pos < len
+                        && (self.chars[pos].is_ascii_alphanumeric()
+                            || matches!(self.chars[pos], b'_' | b'.'))
+                    {
+                        pos += 1;
+                    }
+                }
+            }
+            b'-' => {
+                pos += 1;
+                if pos >= len || !self.chars[pos].is_ascii_digit() {
+                    return None;
+                }
+                while pos < len && self.chars[pos].is_ascii_digit() {
+                    pos += 1;
+                }
+            }
+            c if c.is_ascii_digit() => {
+                pos += 1;
+                while pos < len && self.chars[pos].is_ascii_digit() {
+                    pos += 1;
+                }
+            }
+            _ => return None,
+        }
+        let mut end = pos;
+        while end < len && self.chars[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        if end < len && self.chars[end] == b':' {
+            end += 1;
+            while end < len && self.chars[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            if let Some(range_end) = self.selector_end(end) {
+                end = range_end;
+            }
+        }
+        Some(end)
+    }
+
+    fn branch_arrow_ahead(&self, mut idx: usize) -> bool {
+        let len = self.chars.len();
+        let mut depth = 0usize;
+        while idx < len {
+            let c = self.chars[idx];
+            match c {
+                b'"' | b'\'' => {
+                    idx = self.skip_quoted_literal(idx);
+                }
+                b'(' | b'[' => {
+                    depth += 1;
+                    idx += 1;
+                }
+                b')' | b']' => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    idx += 1;
+                }
+                b',' if depth == 0 => return false,
+                b'-' if depth == 0 && idx + 1 < len && self.chars[idx + 1] == b'>' => return true,
+                _ => {
+                    idx += 1;
+                }
+            }
+        }
+        false
+    }
+
+    fn skip_quoted_literal(&self, start: usize) -> usize {
+        let len = self.chars.len();
+        let quote = self.chars[start];
+        let mut idx = start + 1;
+        while idx < len {
+            let c = self.chars[idx];
+            if c == b'\\' {
+                idx += 2;
+                continue;
+            }
+            if c == quote {
+                return idx + 1;
+            }
+            idx += 1;
+        }
+        len
     }
 
     fn skip_whitespace(&mut self) {

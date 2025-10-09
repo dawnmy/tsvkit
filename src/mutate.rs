@@ -661,6 +661,14 @@ mod tests {
     }
 
     #[test]
+    fn case_when_expression_handles_adjacent_column_tokens() {
+        let headers = vec!["score".to_string()];
+        let expr = "bucket = case_when($score < 0 -> \"neg\", is_na($score) -> $score, $score < 50 -> \"low\", $score < 80 -> \"mid\", _ -> \"high\")";
+        let ops = parse_operations(&[expr.to_string()], &headers, false).unwrap();
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
     fn parse_string_literal_preserves_regex_escapes() {
         let literal = parse_string_literal("\"\\\\.\\\\*\"").unwrap();
         assert_eq!(literal, "\\.\\*");
