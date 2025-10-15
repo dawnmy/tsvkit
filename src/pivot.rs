@@ -6,8 +6,8 @@ use clap::Args;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::common::{
-    InputOptions, default_headers, parse_selector_list, parse_single_selector, reader_for_path,
-    resolve_selectors, should_skip_record,
+    InputOptions, default_headers, inconsistent_width_error, parse_selector_list,
+    parse_single_selector, reader_for_path, resolve_selectors, should_skip_record,
 };
 
 #[derive(Args, Debug)]
@@ -76,19 +76,27 @@ pub fn run(args: PivotArgs) -> Result<()> {
     )?;
 
     let mut reader = reader_for_path(&args.file, args.no_header, &input_opts)?;
+    let source_name = format!("\"{}\"", args.file.display());
     let mut writer = BufWriter::new(io::stdout().lock());
 
     let headers = if args.no_header {
         let mut all_rows = Vec::new();
         let mut expected_width: Option<usize> = None;
+        let mut row_number = 0usize;
         for record in reader.records() {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+            row_number += 1;
             if let Some(width) = expected_width {
                 if record.len() != width {
                     if input_opts.ignore_illegal {
                         continue;
                     } else {
-                        bail!("rows in {:?} have inconsistent column counts", args.file);
+                        return Err(inconsistent_width_error(
+                            &source_name,
+                            row_number,
+                            width,
+                            record.len(),
+                        ));
                     }
                 }
             }
@@ -122,13 +130,20 @@ pub fn run(args: PivotArgs) -> Result<()> {
     };
 
     let mut rows = Vec::new();
+    let mut row_number = 0usize;
     for record in reader.records() {
         let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
+        row_number += 1;
         if record.len() != headers.len() {
             if input_opts.ignore_illegal {
                 continue;
             } else {
-                bail!("rows in {:?} have inconsistent column counts", args.file);
+                return Err(inconsistent_width_error(
+                    &source_name,
+                    row_number + 1,
+                    headers.len(),
+                    record.len(),
+                ));
             }
         }
         if should_skip_record(&record, &input_opts, Some(headers.len())) {

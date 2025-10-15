@@ -148,7 +148,7 @@ The same expression language powers `filter -e`, `mutate -e name=EXPR`, and rege
 | `+ - * / ^` | Arithmetic operators (`^` is exponentiation, right-associative). | Numbers |
 | `== != < <= > >=` | Comparisons. | Numbers or strings |
 | `&` / `and` | Logical AND. | Booleans |
-| `|` / `or` | Logical OR. | Booleans |
+| `\|` / `or` | Logical OR. | Booleans |
 | `!` / `not` | Logical negation. | Booleans |
 | `~` | Regex match. Right-hand side can be literal text or a `$range`. | Strings |
 | `!~` | Regex does *not* match. | Strings |
@@ -165,8 +165,26 @@ The same expression language powers `filter -e`, `mutate -e name=EXPR`, and rege
 | `ln(expr)` | Natural logarithm |
 | `log(expr)` / `log10(expr)` | Base-10 logarithm |
 | `log2(expr)` | Base-2 logarithm |
+| `len(expr)` | Character count using Unicode code points. |
+| `is_na(expr)` | Returns `1` when the expression is blank/`NA`/`NaN`, otherwise `0`. |
 
 Functions accept column references (`abs($purity - 1)`), constants, or subexpressions. Empty or non-numeric values yield blanks.
+
+**Conditional and regex helpers**
+
+- `case_when(condition -> result, ..., _ -> default)` evaluates each boolean condition in order and returns the matching result. The final `_` branch acts as the default.
+- `switch(value, [match1, match2] -> result, ..., _ -> default)` compares `value` to one or more literal matches (strings or numbers) and returns the corresponding result.
+- `re(value, pattern)` evaluates a regex against `value`, returning `1` or `0`. When the pattern matches, capture groups become available as `$1`, `$2`, etc. for the remainder of the expression (use `$0`-style numeric selectors sparingly when you rely on captures).
+
+Example:
+
+```
+case_when(
+    re($sample, "^ERR(\\d+)$") -> $1,
+    re($sample, "^SRR")          -> "SRA",
+    _                              -> $sample
+)
+```
 
 **Row-wise aggregation helpers**
 
@@ -225,7 +243,7 @@ tsvkit filter -e '$group == "case" & $purity >= 0.94' examples/samples.tsv
 | Literals | `1.25`, `"case"` | Strings use double quotes; escape inner quotes with `\"`. |
 | Arithmetic | `($rna_ug - $dna_ug) / $rna_ug` | Standard precedence applies (parentheses for clarity). |
 | Comparisons | `$purity >= 0.9`, `$group != "control"` | Works on numeric or string data. |
-| Logical | `($purity >= 0.9) & ($group == "case")` | `&`, `|`, and `!` (or `and`, `or`, `not`). |
+| Logical | `($purity >= 0.9) & ($group == "case")` | `&`, `\|`, and `!` (or `and`, `or`, `not`). |
 | Numeric functions | `log2($total)`, `sqrt($reads)` | See [Expression language essentials](#expression-language-essentials). |
 | Row-wise aggregators | `sum($dna_ug:$rna_ug)`, `mode($1,$3)`, `countunique($gene:)` | Same catalog as [`summarize`](#summarize): totals, quantiles (`q*` / `p*`), variance/SD, products, entropy, argmin/argmax, membership stats. Works with ranges, lists, and open selectors. |
 | Regex match | `$tech ~ "sRNA"`, `$notes !~ "(?i)fail"` | Patterns follow Rust `regex` syntax. `(?i)` enables case-insensitive matching. |
@@ -258,6 +276,19 @@ tsvkit mutate \
   -e 'log_total=log2($total)' \
   -e 'label=sub($sample_id,"S","Sample_")' \
   examples/cytokines.tsv
+```
+
+Use `case_when`, `switch`, and the `re()` helper for richer branching logic and regex capture reuse:
+
+```bash
+tsvkit mutate \
+  -e 'label = case_when(
+        re($sample, "^ERR(\d+)$") -> $1,
+        re($sample, "^SRR")        -> "SRA",
+        _                            -> $sample
+      )' \
+  -e 'bucket = case_when(len($clean) == 0 -> "empty", len($clean) < 5 -> "short", _ -> "long")' \
+  examples/samples.tsv
 ```
 
 Apply in-place edits with the sed-style form:

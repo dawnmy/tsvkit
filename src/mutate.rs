@@ -371,10 +371,10 @@ fn parse_substitution_expression(
     let content = content
         .strip_suffix('/')
         .with_context(|| "substitution expression must end with '/'")?;
-    let (selector_part, pattern_part, replacement_part) =
-        split_substitution_components(content).with_context(|| {
-            "substitution expression must use s/selectors/pattern/replacement/ syntax"
-        })?;
+    let (selector_part, pattern_part, replacement_part) = split_substitution_components(content)
+        .with_context(
+            || "substitution expression must use s/selectors/pattern/replacement/ syntax",
+        )?;
 
     let selectors = parse_selector_list(&normalize_selector_spec(selector_part.trim()))?;
     if selectors.is_empty() {
@@ -630,12 +630,7 @@ mod tests {
     #[test]
     fn substitution_replacement_supports_escape_sequences() {
         let headers = vec!["col1".to_string()];
-        let ops = parse_operations(
-            &vec!["s/$col1/\\t/ /".to_string()],
-            &headers,
-            false,
-        )
-        .unwrap();
+        let ops = parse_operations(&vec!["s/$col1/\\t/ /".to_string()], &headers, false).unwrap();
 
         let mut row = vec!["field\tvalue".to_string()];
         process_row(&mut row, &ops).unwrap();
@@ -655,6 +650,22 @@ mod tests {
         let mut row = vec!["foo/bar".to_string()];
         process_row(&mut row, &ops).unwrap();
         assert_eq!(row[0], "hello/world");
+    }
+
+    #[test]
+    fn case_when_expression_parses_with_named_columns() {
+        let headers = vec!["sample_id".to_string()];
+        let expr = "label = case_when(\n        re($sample_id, \"^ERR(\\\\d+)$\") -> $1,\n        _                         -> $sample_id\n      )";
+        let ops = parse_operations(&[expr.to_string()], &headers, false).unwrap();
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn case_when_expression_handles_adjacent_column_tokens() {
+        let headers = vec!["score".to_string()];
+        let expr = "bucket = case_when($score < 0 -> \"neg\", is_na($score) -> $score, $score < 50 -> \"low\", $score < 80 -> \"mid\", _ -> \"high\")";
+        let ops = parse_operations(&[expr.to_string()], &headers, false).unwrap();
+        assert_eq!(ops.len(), 1);
     }
 
     #[test]

@@ -8,8 +8,9 @@ use num_cpus;
 use rayon::{ThreadPoolBuilder, prelude::*};
 
 use crate::common::{
-    ColumnSelector, InputOptions, default_headers, parse_multi_selector_spec, parse_selector_list,
-    reader_for_path, resolve_selectors, should_skip_record,
+    ColumnSelector, InputOptions, default_headers, inconsistent_width_error,
+    parse_multi_selector_spec, parse_selector_list, reader_for_path, resolve_selectors,
+    should_skip_record,
 };
 
 #[derive(Args, Debug)]
@@ -97,6 +98,8 @@ struct StreamTable {
     source: String,
     projection: Vec<usize>,
     input_opts: InputOptions,
+    row_number: usize,
+    header_rows: usize,
 }
 
 #[derive(Clone)]
@@ -115,14 +118,16 @@ impl StreamTable {
         fill_value: &str,
     ) -> Result<Self> {
         let mut reader = reader_for_path(path, no_header, input_opts)?;
-        let source = path.display().to_string();
+        let source = format!("\"{}\"", path.display());
 
         if no_header {
             let mut records = reader.records();
             let mut first_record: Option<csv::StringRecord> = None;
             let mut source_width = 0usize;
+            let mut row_number = 0usize;
             while let Some(rec) = records.next() {
                 let record = rec.with_context(|| format!("failed reading from {}", source))?;
+                row_number += 1;
                 if should_skip_record(
                     &record,
                     input_opts,
@@ -138,7 +143,12 @@ impl StreamTable {
                     if input_opts.ignore_illegal {
                         continue;
                     } else {
-                        bail!("rows in {} have inconsistent column counts", source);
+                        return Err(inconsistent_width_error(
+                            &source,
+                            row_number,
+                            source_width,
+                            record.len(),
+                        ));
                     }
                 }
                 source_width = record.len();
@@ -167,6 +177,8 @@ impl StreamTable {
                 source,
                 projection: projection_plan.projection,
                 input_opts: input_opts.clone(),
+                row_number,
+                header_rows: 0,
             });
         }
 
@@ -194,6 +206,8 @@ impl StreamTable {
             source,
             projection: projection_plan.projection,
             input_opts: input_opts.clone(),
+            row_number: 0,
+            header_rows: 1,
         })
     }
 
@@ -236,11 +250,17 @@ impl StreamTable {
                 Some(rec) => {
                     let record =
                         rec.with_context(|| format!("failed reading from {}", self.source))?;
+                    self.row_number += 1;
                     if record.len() != self.source_width {
                         if self.input_opts.ignore_illegal {
                             continue;
                         } else {
-                            bail!("rows in {} have inconsistent column counts", self.source);
+                            return Err(inconsistent_width_error(
+                                &self.source,
+                                self.header_rows + self.row_number,
+                                self.source_width,
+                                record.len(),
+                            ));
                         }
                     }
                     if should_skip_record(&record, &self.input_opts, Some(self.source_width)) {
@@ -336,13 +356,16 @@ fn load_table(
     fill_value: &str,
 ) -> Result<Table> {
     let mut reader = reader_for_path(path, no_header, input_opts)?;
+    let source_name = format!("\"{}\"", path.display());
 
     let (headers, rows, join_indices, include_indices) = if no_header {
         let mut records = reader.records();
         let mut first_record: Option<csv::StringRecord> = None;
         let mut expected_width: Option<usize> = None;
+        let mut row_number = 0usize;
         while let Some(rec) = records.next() {
             let record = rec.with_context(|| format!("failed reading from {}", path.display()))?;
+            row_number += 1;
             if should_skip_record(&record, input_opts, expected_width) {
                 continue;
             }
@@ -351,7 +374,12 @@ fn load_table(
                     if input_opts.ignore_illegal {
                         continue;
                     } else {
-                        bail!("rows in {} have inconsistent column counts", path.display());
+                        return Err(inconsistent_width_error(
+                            &source_name,
+                            row_number,
+                            width,
+                            record.len(),
+                        ));
                     }
                 }
             }
@@ -375,11 +403,17 @@ fn load_table(
 
         for rec in records {
             let record = rec.with_context(|| format!("failed reading from {}", path.display()))?;
+            row_number += 1;
             if record.len() != expected_width {
                 if input_opts.ignore_illegal {
                     continue;
                 } else {
-                    bail!("rows in {} have inconsistent column counts", path.display());
+                    return Err(inconsistent_width_error(
+                        &source_name,
+                        row_number,
+                        expected_width,
+                        record.len(),
+                    ));
                 }
             }
             if should_skip_record(&record, input_opts, Some(expected_width)) {
@@ -408,13 +442,20 @@ fn load_table(
         let projection_plan =
             build_projection(&headers_orig, &join_indices_orig, &include_indices_orig);
         let mut rows = Vec::new();
+        let mut row_number = 0usize;
         for rec in reader.records() {
             let record = rec.with_context(|| format!("failed reading from {}", path.display()))?;
+            row_number += 1;
             if record.len() != expected_width {
                 if input_opts.ignore_illegal {
                     continue;
                 } else {
-                    bail!("rows in {} have inconsistent column counts", path.display());
+                    return Err(inconsistent_width_error(
+                        &source_name,
+                        row_number + 1,
+                        expected_width,
+                        record.len(),
+                    ));
                 }
             }
             if should_skip_record(&record, input_opts, Some(expected_width)) {
