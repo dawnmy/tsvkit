@@ -148,7 +148,7 @@ The same expression language powers `filter -e`, `mutate -e name=EXPR`, and rege
 | `+ - * / ^` | Arithmetic operators (`^` is exponentiation, right-associative). | Numbers |
 | `== != < <= > >=` | Comparisons. | Numbers or strings |
 | `&` / `and` | Logical AND. | Booleans |
-| `|` / `or` | Logical OR. | Booleans |
+| `\|` / `or` | Logical OR. | Booleans |
 | `!` / `not` | Logical negation. | Booleans |
 | `~` | Regex match. Right-hand side can be literal text or a `$range`. | Strings |
 | `!~` | Regex does *not* match. | Strings |
@@ -243,7 +243,7 @@ tsvkit filter -e '$group == "case" & $purity >= 0.94' examples/samples.tsv
 | Literals | `1.25`, `"case"` | Strings use double quotes; escape inner quotes with `\"`. |
 | Arithmetic | `($rna_ug - $dna_ug) / $rna_ug` | Standard precedence applies (parentheses for clarity). |
 | Comparisons | `$purity >= 0.9`, `$group != "control"` | Works on numeric or string data. |
-| Logical | `($purity >= 0.9) & ($group == "case")` | `&`, `|`, and `!` (or `and`, `or`, `not`). |
+| Logical | `($purity >= 0.9) & ($group == "case")` | `&`, `\|`, and `!` (or `and`, `or`, `not`). |
 | Numeric functions | `log2($total)`, `sqrt($reads)` | See [Expression language essentials](#expression-language-essentials). |
 | Row-wise aggregators | `sum($dna_ug:$rna_ug)`, `mode($1,$3)`, `countunique($gene:)` | Same catalog as [`summarize`](#summarize): totals, quantiles (`q*` / `p*`), variance/SD, products, entropy, argmin/argmax, membership stats. Works with ranges, lists, and open selectors. |
 | Regex match | `$tech ~ "sRNA"`, `$notes !~ "(?i)fail"` | Patterns follow Rust `regex` syntax. `(?i)` enables case-insensitive matching. |
