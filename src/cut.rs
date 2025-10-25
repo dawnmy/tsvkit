@@ -6,20 +6,20 @@ use clap::Args;
 
 use crate::common::{
     ColumnSelector, InputOptions, SpecialColumn, default_headers, parse_selector_list,
-    reader_for_path, resolve_selectors, should_skip_record,
+    reader_for_path, resolve_selectors, resolve_selectors_allow_duplicates, should_skip_record,
 };
 
 #[derive(Args, Debug)]
 #[command(
     about = "Select and reorder TSV columns",
-    long_about = "Pick columns by name or 1-based index. Combine comma-separated selectors with ranges (colA:colD or 2:6) and single fields in one spec. Defaults to header-aware mode; add -H for headerless input.\n\nExamples:\n  tsvkit cut -f id,sample3,sample1 examples/profiles.tsv\n  tsvkit cut -f 'Purity,sample:FN,F1' examples/profiles.tsv\n  tsvkit cut -H -f 3,1 data.tsv"
+    long_about = "Pick columns by name or 1-based index. Combine comma-separated selectors with ranges (colA:colD or 2:6) and single fields in one spec. Use ~\"regex\" to match columns by pattern. Defaults to header-aware mode; add -H for headerless input.\n\nExamples:\n  tsvkit cut -f id,sample3,sample1 examples/profiles.tsv\n  tsvkit cut -f 'Purity,sample:FN,F1' examples/profiles.tsv\n  tsvkit cut -H -f 3,1 data.tsv"
 )]
 pub struct CutArgs {
     /// Input TSV file(s) (use '-' for stdin; supports gz/xz)
     #[arg(value_name = "FILES", num_args = 0.., default_values = ["-"])]
     pub files: Vec<PathBuf>,
 
-    /// Fields to select, using names, 1-based indices, ranges (`colA:colD`, `2:5`), or mixes. Comma-separated list.
+    /// Fields to select, using names, 1-based indices, ranges (`colA:colD`, `2:5`), regex (`~"^sample"`), or mixes. Comma-separated list.
     #[arg(short = 'f', long = "fields", value_name = "COLS", required = true)]
     pub fields: String,
 
@@ -47,6 +47,10 @@ pub struct CutArgs {
     /// Ignore rows whose column count differs from the header/first row
     #[arg(short = 'I', long = "ignore-illegal-row")]
     pub ignore_illegal_row: bool,
+
+    /// Allow duplicate column matches when resolving names or regex selectors
+    #[arg(short = 'D', long = "allow-dups")]
+    pub allow_dups: bool,
 }
 
 pub fn run(args: CutArgs) -> Result<()> {
@@ -73,6 +77,7 @@ pub fn run(args: CutArgs) -> Result<()> {
                 &file_info,
                 &input_opts,
                 &mut writer,
+                args.allow_dups,
             )?;
         } else {
             process_header_file(
@@ -84,6 +89,7 @@ pub fn run(args: CutArgs) -> Result<()> {
                 &input_opts,
                 &mut writer,
                 &mut header_emitted,
+                args.allow_dups,
             )?;
         }
     }
@@ -99,6 +105,7 @@ fn process_no_header_file(
     file_info: &FileInfo,
     input_opts: &InputOptions,
     writer: &mut BufWriter<io::StdoutLock<'_>>,
+    allow_duplicates: bool,
 ) -> Result<()> {
     let mut records = reader.records();
     let first_record = loop {
@@ -115,7 +122,7 @@ fn process_no_header_file(
     };
     let expected_width = first_record.len();
     let headers = default_headers(expected_width);
-    let columns = build_cut_columns(&headers, selectors, true)?;
+    let columns = build_cut_columns(&headers, selectors, true, allow_duplicates)?;
     emit_record(&first_record, &columns, file_info, writer)?;
     for record in records {
         let record = record.with_context(|| format!("failed reading from {:?}", path))?;
@@ -136,6 +143,7 @@ fn process_header_file(
     input_opts: &InputOptions,
     writer: &mut BufWriter<io::StdoutLock<'_>>,
     header_emitted: &mut bool,
+    allow_duplicates: bool,
 ) -> Result<()> {
     let headers = reader
         .headers()
@@ -143,7 +151,7 @@ fn process_header_file(
         .iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
-    let columns = build_cut_columns(&headers, selectors, false)?;
+    let columns = build_cut_columns(&headers, selectors, false, allow_duplicates)?;
     let expected_width = headers.len();
 
     if !*header_emitted {
@@ -199,6 +207,7 @@ fn build_cut_columns(
     headers: &[String],
     selectors: &[ColumnSelector],
     no_header: bool,
+    allow_duplicates: bool,
 ) -> Result<Vec<CutColumn>> {
     let mut columns = Vec::new();
     for selector in selectors {
@@ -214,11 +223,19 @@ fn build_cut_columns(
                 {
                     bail!("special columns cannot be used within a range selector");
                 }
-                let indices = resolve_selectors(headers, &[selector.clone()], no_header)?;
+                let indices = if allow_duplicates {
+                    resolve_selectors_allow_duplicates(headers, &[selector.clone()], no_header)?
+                } else {
+                    resolve_selectors(headers, &[selector.clone()], no_header)?
+                };
                 columns.extend(indices.into_iter().map(CutColumn::Index));
             }
             _ => {
-                let indices = resolve_selectors(headers, &[selector.clone()], no_header)?;
+                let indices = if allow_duplicates {
+                    resolve_selectors_allow_duplicates(headers, &[selector.clone()], no_header)?
+                } else {
+                    resolve_selectors(headers, &[selector.clone()], no_header)?
+                };
                 columns.extend(indices.into_iter().map(CutColumn::Index));
             }
         }
