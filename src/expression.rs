@@ -35,6 +35,7 @@ pub enum ValueExpr {
         default: Option<Box<ValueExpr>>,
     },
     RegexCall(Box<ValueExpr>, Box<ValueExpr>),
+    List(Vec<ValueExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,8 @@ pub enum CompareOp {
     Le,
     RegexMatch,
     RegexNotMatch,
+    In,
+    NotIn,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +180,13 @@ pub fn bind_expression(expr: Expr, headers: &[String], no_header: bool) -> Resul
                     invert: matches!(op, CompareOp::RegexNotMatch),
                 })
             }
+            CompareOp::In | CompareOp::NotIn => {
+                let left = bind_value(lhs, headers, no_header)?;
+                ensure_scalar_bound_value(&left, "left-hand side of 'in'")?;
+                let right = bind_value(rhs, headers, no_header)?;
+                ensure_membership_target(&right)?;
+                Ok(BoundExpr::Compare(left, op, right))
+            }
             _ => Ok(BoundExpr::Compare(
                 bind_value(lhs, headers, no_header)?,
                 op,
@@ -240,6 +250,7 @@ pub enum BoundValue {
         value: Box<BoundValue>,
         pattern: RegexPattern,
     },
+    List(Vec<BoundValue>),
 }
 
 #[derive(Debug, Clone)]
@@ -570,6 +581,25 @@ where
                 bool_eval(false)
             }
         }
+        BoundValue::List(items) => {
+            if items.is_empty() {
+                return empty_eval();
+            }
+            let mut combined = String::new();
+            for (idx, item) in items.iter().enumerate() {
+                let saved = ctx.take_captures();
+                let value = eval_value_with_context(item, ctx);
+                ctx.restore_captures(saved);
+                if idx > 0 {
+                    combined.push(',');
+                }
+                combined.push_str(value.text.as_ref());
+            }
+            EvalValue {
+                text: Cow::Owned(combined),
+                numeric: None,
+            }
+        }
     }
 }
 
@@ -616,30 +646,102 @@ fn evaluate_compare<'a, R>(
 where
     R: RowAccessor + ?Sized,
 {
-    let left = eval_value_with_context(lhs, ctx);
-    let right = eval_value_with_context(rhs, ctx);
-
     match op {
-        CompareOp::Eq => {
-            if let (Some(a), Some(b)) = (left.numeric, right.numeric) {
-                a == b
-            } else {
-                left.text == right.text
-            }
-        }
-        CompareOp::Ne => {
-            if let (Some(a), Some(b)) = (left.numeric, right.numeric) {
-                a != b
-            } else {
-                left.text != right.text
-            }
-        }
-        CompareOp::Gt => compare_numeric(&left, &right, |a, b| a > b),
-        CompareOp::Ge => compare_numeric(&left, &right, |a, b| a >= b),
-        CompareOp::Lt => compare_numeric(&left, &right, |a, b| a < b),
-        CompareOp::Le => compare_numeric(&left, &right, |a, b| a <= b),
+        CompareOp::In => evaluate_membership(lhs, rhs, ctx, false),
+        CompareOp::NotIn => evaluate_membership(lhs, rhs, ctx, true),
         CompareOp::RegexMatch | CompareOp::RegexNotMatch => false,
+        _ => {
+            let left = eval_value_with_context(lhs, ctx);
+            let right = eval_value_with_context(rhs, ctx);
+            match op {
+                CompareOp::Eq => {
+                    if let (Some(a), Some(b)) = (left.numeric, right.numeric) {
+                        a == b
+                    } else {
+                        left.text == right.text
+                    }
+                }
+                CompareOp::Ne => {
+                    if let (Some(a), Some(b)) = (left.numeric, right.numeric) {
+                        a != b
+                    } else {
+                        left.text != right.text
+                    }
+                }
+                CompareOp::Gt => compare_numeric(&left, &right, |a, b| a > b),
+                CompareOp::Ge => compare_numeric(&left, &right, |a, b| a >= b),
+                CompareOp::Lt => compare_numeric(&left, &right, |a, b| a < b),
+                CompareOp::Le => compare_numeric(&left, &right, |a, b| a <= b),
+                _ => false,
+            }
+        }
     }
+}
+
+fn evaluate_membership<'a, R>(
+    lhs: &'a BoundValue,
+    rhs: &'a BoundValue,
+    ctx: &mut EvalContext<'a, R>,
+    invert: bool,
+) -> bool
+where
+    R: RowAccessor + ?Sized,
+{
+    let left_eval = eval_value_with_context(lhs, ctx);
+    let found = match rhs {
+        BoundValue::List(values) => {
+            let mut matched = false;
+            for value in values {
+                let saved = ctx.take_captures();
+                let candidate = eval_value_with_context(value, ctx);
+                ctx.restore_captures(saved);
+                if eval_values_equal(&left_eval, &candidate) {
+                    matched = true;
+                    break;
+                }
+            }
+            matched
+        }
+        BoundValue::Column(idx) => {
+            let text = ctx.row().get(*idx).unwrap_or("");
+            eval_matches_text(&left_eval, text)
+        }
+        BoundValue::Columns(indices) => {
+            let mut matched = false;
+            for idx in indices {
+                let text = ctx.row().get(*idx).unwrap_or("");
+                if eval_matches_text(&left_eval, text) {
+                    matched = true;
+                    break;
+                }
+            }
+            matched
+        }
+        other => {
+            let candidate = eval_value_with_context(other, ctx);
+            eval_values_equal(&left_eval, &candidate)
+        }
+    };
+    if invert { !found } else { found }
+}
+
+fn eval_values_equal(left: &EvalValue<'_>, right: &EvalValue<'_>) -> bool {
+    if let (Some(a), Some(b)) = (left.numeric, right.numeric) {
+        a == b
+    } else {
+        left.text == right.text
+    }
+}
+
+fn eval_matches_text(left: &EvalValue<'_>, candidate: &str) -> bool {
+    if let Some(left_num) = left.numeric {
+        if let Some(candidate_num) = parse_float(candidate) {
+            if left_num == candidate_num {
+                return true;
+            }
+        }
+    }
+    left.text == candidate
 }
 
 fn evaluate_regex<'a, R>(
@@ -794,6 +896,29 @@ fn bind_value(value: ValueExpr, headers: &[String], no_header: bool) -> Result<B
                 pattern: bound_pattern,
             })
         }
+        ValueExpr::List(items) => {
+            let mut bound_items = Vec::with_capacity(items.len());
+            for item in items {
+                let bound = bind_value(item, headers, no_header)?;
+                ensure_scalar_bound_value(&bound, "list element")?;
+                bound_items.push(bound);
+            }
+            Ok(BoundValue::List(bound_items))
+        }
+    }
+}
+
+fn ensure_scalar_bound_value(value: &BoundValue, context: &str) -> Result<()> {
+    if matches!(value, BoundValue::Columns(_) | BoundValue::List(_)) {
+        bail!("{} must resolve to a single value", context);
+    }
+    Ok(())
+}
+
+fn ensure_membership_target(value: &BoundValue) -> Result<()> {
+    match value {
+        BoundValue::List(_) | BoundValue::Column(_) | BoundValue::Columns(_) => Ok(()),
+        _ => bail!("right-hand side of 'in'/'!in' must be a list or column selector"),
     }
 }
 
@@ -1094,6 +1219,55 @@ mod tests {
         let result = eval_value(&bound, &row);
         assert_eq!(result.numeric, Some(5.0));
     }
+
+    #[test]
+    fn membership_operator_accepts_literal_list() {
+        let expr = parse_expression("$group in [\"case\",\"control\"]").unwrap();
+        let headers = vec!["group".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = csv::StringRecord::from(vec!["case"]);
+        assert!(evaluate(&bound, &row));
+        let row = csv::StringRecord::from(vec!["test"]);
+        assert!(!evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn membership_operator_supports_negation() {
+        let expr = parse_expression("$status !in [\"fail\",\"missing\"]").unwrap();
+        let headers = vec!["status".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = csv::StringRecord::from(vec!["ok"]);
+        assert!(evaluate(&bound, &row));
+        let row = csv::StringRecord::from(vec!["fail"]);
+        assert!(!evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn membership_operator_accepts_column_range() {
+        let expr = parse_expression("$value in $a:$c").unwrap();
+        let headers = vec![
+            "value".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+        ];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = csv::StringRecord::from(vec!["x", "w", "x", "z"]);
+        assert!(evaluate(&bound, &row));
+        let row = csv::StringRecord::from(vec!["q", "w", "x", "z"]);
+        assert!(!evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn membership_requires_list_on_rhs() {
+        let expr = parse_expression("$value in 5").unwrap();
+        let headers = vec!["value".to_string()];
+        let err = bind_expression(expr, &headers, false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("right-hand side of 'in'/'!in' must be a list")
+        );
+    }
 }
 
 impl<'a> Lexer<'a> {
@@ -1134,6 +1308,9 @@ impl<'a> Lexer<'a> {
                 } else if self.peek_char(1) == Some(b'~') {
                     self.pos += 2;
                     Ok(Some(Token::Compare(CompareOp::RegexNotMatch)))
+                } else if self.match_keyword(1, "in") {
+                    self.pos += 3;
+                    Ok(Some(Token::Compare(CompareOp::NotIn)))
                 } else {
                     self.pos += 1;
                     Ok(Some(Token::Not))
@@ -1217,7 +1394,11 @@ impl<'a> Lexer<'a> {
             c if c.is_ascii_digit() || c == b'.' => self.lex_number(),
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let ident = self.lex_identifier();
-                Ok(Some(Token::Ident(ident)))
+                if ident.eq_ignore_ascii_case("in") {
+                    Ok(Some(Token::Compare(CompareOp::In)))
+                } else {
+                    Ok(Some(Token::Ident(ident)))
+                }
             }
             _ => bail!("unexpected character '{}' in expression", ch as char),
         }
@@ -1402,6 +1583,26 @@ impl<'a> Lexer<'a> {
 
     fn match_char(&self, expected: u8) -> bool {
         self.pos < self.chars.len() && self.chars[self.pos] == expected
+    }
+
+    fn match_keyword(&self, offset: usize, keyword: &str) -> bool {
+        let start = self.pos + offset;
+        let end = start + keyword.len();
+        if end > self.chars.len() {
+            return false;
+        }
+        let slice = &self.chars[start..end];
+        let Ok(text) = std::str::from_utf8(slice) else {
+            return false;
+        };
+        if !text.eq_ignore_ascii_case(keyword) {
+            return false;
+        }
+        if end == self.chars.len() {
+            return true;
+        }
+        let next = self.chars[end];
+        !next.is_ascii_alphanumeric() && next != b'_'
     }
 
     fn peek_char(&self, offset: usize) -> Option<u8> {
@@ -1755,6 +1956,11 @@ impl Parser {
                     unreachable!()
                 }
             }
+            Some(Token::LBracket) => {
+                self.pos += 1;
+                let items = self.parse_list_literal_values()?;
+                Ok(ValueExpr::List(items))
+            }
             Some(Token::String(_)) => {
                 if let Some(Token::String(value)) = self.advance().cloned() {
                     Ok(ValueExpr::String(value))
@@ -2039,6 +2245,25 @@ impl Parser {
             let value = self.parse_arith()?;
             Ok(vec![value])
         }
+    }
+
+    fn parse_list_literal_values(&mut self) -> Result<Vec<ValueExpr>> {
+        let mut values = Vec::new();
+        if self.consume_token(TokenKind::RBracket) {
+            return Ok(values);
+        }
+        loop {
+            let value = self.parse_arith()?;
+            values.push(value);
+            if self.consume_token(TokenKind::Comma) {
+                continue;
+            } else if self.consume_token(TokenKind::RBracket) {
+                break;
+            } else {
+                bail!("expected ',' or ']' in list literal");
+            }
+        }
+        Ok(values)
     }
 
     fn consume_compare(&mut self) -> Option<CompareOp> {

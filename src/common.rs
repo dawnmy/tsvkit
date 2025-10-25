@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::Path;
@@ -5,6 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use csv::ReaderBuilder;
 use flate2::read::MultiGzDecoder;
+use regex::Regex;
 use xz2::read::XzDecoder;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,7 @@ pub enum ColumnSelector {
     Index(usize),
     FromEnd(usize),
     Name(String),
+    Regex(String),
     Range(Option<Box<ColumnSelector>>, Option<Box<ColumnSelector>>),
     Special(SpecialColumn),
 }
@@ -99,7 +102,24 @@ pub fn resolve_selectors(
     selectors: &[ColumnSelector],
     no_header: bool,
 ) -> Result<Vec<usize>> {
-    let mut indices = Vec::with_capacity(selectors.len());
+    resolve_selectors_with_options(headers, selectors, no_header, false)
+}
+
+pub fn resolve_selectors_allow_duplicates(
+    headers: &[String],
+    selectors: &[ColumnSelector],
+    no_header: bool,
+) -> Result<Vec<usize>> {
+    resolve_selectors_with_options(headers, selectors, no_header, true)
+}
+
+fn resolve_selectors_with_options(
+    headers: &[String],
+    selectors: &[ColumnSelector],
+    no_header: bool,
+    allow_duplicates: bool,
+) -> Result<Vec<usize>> {
+    let mut indices = Vec::new();
     for selector in selectors {
         match selector {
             ColumnSelector::Special(special) => {
@@ -108,9 +128,13 @@ pub fn resolve_selectors(
                     special.default_header()
                 );
             }
-            ColumnSelector::Index(_) | ColumnSelector::FromEnd(_) | ColumnSelector::Name(_) => {
-                let index = resolve_selector_index(headers, selector, no_header)?;
-                indices.push(index);
+            ColumnSelector::Index(_)
+            | ColumnSelector::FromEnd(_)
+            | ColumnSelector::Name(_)
+            | ColumnSelector::Regex(_) => {
+                let mut resolved =
+                    resolve_selector_indices(headers, selector, no_header, allow_duplicates)?;
+                indices.append(&mut resolved);
             }
             ColumnSelector::Range(start, end) => {
                 if headers.is_empty() {
@@ -282,6 +306,9 @@ fn parse_simple_selector(token: &str) -> Result<ColumnSelector> {
     if token.is_empty() {
         return Err(anyhow!("empty column selector"));
     }
+    if let Some(regex) = parse_regex_literal(token)? {
+        return Ok(ColumnSelector::Regex(regex));
+    }
     if let Some(literal) = parse_backtick_literal(token)? {
         return Ok(ColumnSelector::Name(literal));
     }
@@ -312,6 +339,46 @@ fn parse_simple_selector(token: &str) -> Result<ColumnSelector> {
         return Ok(ColumnSelector::Index(idx - 1));
     }
     Ok(ColumnSelector::Name(token.to_string()))
+}
+
+fn parse_regex_literal(token: &str) -> Result<Option<String>> {
+    let trimmed = token.trim();
+    if !trimmed.starts_with('~') {
+        return Ok(None);
+    }
+    let remainder = trimmed[1..].trim_start();
+    let mut chars = remainder.chars();
+    match chars.next() {
+        Some('"') => {
+            let mut value = String::new();
+            let mut escaped = false;
+            while let Some(ch) = chars.next() {
+                if escaped {
+                    value.push(ch);
+                    escaped = false;
+                    continue;
+                }
+                match ch {
+                    '\\' => {
+                        escaped = true;
+                    }
+                    '"' => {
+                        if !chars.as_str().is_empty() {
+                            bail!("unexpected trailing characters after regex selector literal");
+                        }
+                        return Ok(Some(value));
+                    }
+                    other => value.push(other),
+                }
+            }
+            bail!("unterminated regex selector literal");
+        }
+        Some(other) => bail!(
+            "regex column selector must use double quotes (e.g. ~\"pattern\"), got '{}'",
+            other
+        ),
+        None => bail!("regex column selector requires a quoted pattern"),
+    }
 }
 
 fn parse_backtick_literal(token: &str) -> Result<Option<String>> {
@@ -521,6 +588,89 @@ fn tokenize_selector_spec(spec: &str) -> Result<Vec<SelectorToken>> {
     Ok(tokens)
 }
 
+fn resolve_selector_indices(
+    headers: &[String],
+    selector: &ColumnSelector,
+    no_header: bool,
+    allow_duplicates: bool,
+) -> Result<Vec<usize>> {
+    match selector {
+        ColumnSelector::Index(idx) => {
+            let index = *idx;
+            if index >= headers.len() {
+                bail!(
+                    "column index {} out of range ({} columns)",
+                    index + 1,
+                    headers.len()
+                );
+            }
+            Ok(vec![index])
+        }
+        ColumnSelector::FromEnd(offset) => {
+            let offset = *offset;
+            if offset == 0 {
+                bail!("column selector '-0' is not allowed");
+            }
+            if offset > headers.len() {
+                bail!(
+                    "column selector '-{}' out of range ({} columns)",
+                    offset,
+                    headers.len()
+                );
+            }
+            Ok(vec![headers.len() - offset])
+        }
+        ColumnSelector::Name(name) => {
+            if no_header {
+                bail!("column names cannot be used when input lacks a header row");
+            }
+            if allow_duplicates {
+                let mut matches = Vec::new();
+                for (idx, header) in headers.iter().enumerate() {
+                    if header == name {
+                        matches.push(idx);
+                    }
+                }
+                if matches.is_empty() {
+                    bail!("column '{}' not found", name);
+                }
+                Ok(matches)
+            } else {
+                let index = headers
+                    .iter()
+                    .position(|h| h == name)
+                    .with_context(|| format!("column '{}' not found", name))?;
+                Ok(vec![index])
+            }
+        }
+        ColumnSelector::Regex(pattern) => {
+            if no_header {
+                bail!("regex column selectors require headers");
+            }
+            let regex = Regex::new(pattern)
+                .with_context(|| format!("invalid regex pattern '{}'", pattern))?;
+            let mut seen = HashSet::new();
+            let mut matches = Vec::new();
+            for (idx, header) in headers.iter().enumerate() {
+                if regex.is_match(header) {
+                    if allow_duplicates || seen.insert(header.clone()) {
+                        matches.push(idx);
+                    }
+                }
+            }
+            if matches.is_empty() {
+                bail!("regex pattern '{}' did not match any columns", pattern);
+            }
+            Ok(matches)
+        }
+        ColumnSelector::Range(_, _) => unreachable!("range selectors handled separately"),
+        ColumnSelector::Special(special) => bail!(
+            "special column '{}' not supported without column injection",
+            special.default_header()
+        ),
+    }
+}
+
 fn resolve_selector_index(
     headers: &[String],
     selector: &ColumnSelector,
@@ -562,6 +712,9 @@ fn resolve_selector_index(
                 .with_context(|| format!("column '{}' not found", name))?;
             Ok(index)
         }
+        ColumnSelector::Regex(_) => {
+            bail!("regex column selectors cannot be used in range endpoints")
+        }
         ColumnSelector::Special(special) => bail!(
             "special column '{}' not supported without column injection",
             special.default_header()
@@ -576,7 +729,7 @@ fn resolve_selector_index(
 mod tests {
     use super::{
         ColumnSelector, SpecialColumn, parse_selector_list, parse_single_selector,
-        resolve_selectors,
+        resolve_selectors, resolve_selectors_allow_duplicates,
     };
 
     #[test]
@@ -701,5 +854,31 @@ mod tests {
         ));
         assert!(matches!(selectors[1], ColumnSelector::Name(ref name) if name == "__file__"));
         assert!(matches!(selectors[2], ColumnSelector::Name(ref name) if name == "__base__"));
+    }
+
+    #[test]
+    fn regex_selector_matches_columns() {
+        let headers = vec![
+            "sample_a".to_string(),
+            "other".to_string(),
+            "sample_b".to_string(),
+        ];
+        let selectors = parse_selector_list("~\"^sample_\"").unwrap();
+        let indices = resolve_selectors(&headers, &selectors, false).unwrap();
+        assert_eq!(indices, vec![0, 2]);
+    }
+
+    #[test]
+    fn allow_duplicates_includes_repeated_headers() {
+        let headers = vec![
+            "value".to_string(),
+            "value".to_string(),
+            "other".to_string(),
+        ];
+        let selectors = parse_selector_list("value").unwrap();
+        let indices = resolve_selectors(&headers, &selectors, false).unwrap();
+        assert_eq!(indices, vec![0]);
+        let indices = resolve_selectors_allow_duplicates(&headers, &selectors, false).unwrap();
+        assert_eq!(indices, vec![0, 1]);
     }
 }

@@ -10,7 +10,8 @@ use indexmap::IndexMap;
 
 use crate::common::{
     InputOptions, default_headers, parse_selector_list, parse_single_selector, reader_for_path,
-    resolve_selectors, resolve_single_selector, should_skip_record,
+    resolve_selectors, resolve_selectors_allow_duplicates, resolve_single_selector,
+    should_skip_record,
 };
 
 #[derive(Args, Debug)]
@@ -27,7 +28,7 @@ pub struct SummarizeArgs {
     #[arg(short = 'g', long = "group", value_name = "COLS")]
     pub group_cols: Option<String>,
 
-    /// Statistics to compute (`COLUMN=ops`). Columns accept names, indices, ranges (e.g. `IL6:IL10`); operations are comma-separated (sum, mean, median, sd, var, min, max, mode, distinct, q*/p* aliases). Repeatable.
+    /// Statistics to compute (`COLUMN=ops`). Columns accept names, indices, ranges (e.g. `IL6:IL10`), and regex (`~"^sample"`); operations are comma-separated (sum, mean, median, sd, var, min, max, mode, distinct, q*/p* aliases). Repeatable.
     #[arg(short = 's', long = "stat", value_name = "COLUMN=OPS", required = true)]
     pub stats: Vec<String>,
 
@@ -51,6 +52,10 @@ pub struct SummarizeArgs {
     /// Ignore rows whose column count differs from the header/first row
     #[arg(short = 'I', long = "ignore-illegal-row")]
     pub ignore_illegal_row: bool,
+
+    /// Allow duplicate column matches when resolving names or regex selectors
+    #[arg(short = 'D', long = "allow-dups")]
+    pub allow_dups: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -665,7 +670,7 @@ pub fn run(args: SummarizeArgs) -> Result<()> {
         };
         headers = default_headers(first_record.len());
         group_indices = parse_group_indices(args.group_cols.as_deref(), &headers, true)?;
-        stat_requests = parse_stat_requests(&args.stats, &headers, true)?;
+        stat_requests = parse_stat_requests(&args.stats, &headers, true, args.allow_dups)?;
 
         process_record(&mut groups, &group_indices, &stat_requests, &first_record);
         for record in records {
@@ -683,7 +688,7 @@ pub fn run(args: SummarizeArgs) -> Result<()> {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
         group_indices = parse_group_indices(args.group_cols.as_deref(), &headers, false)?;
-        stat_requests = parse_stat_requests(&args.stats, &headers, false)?;
+        stat_requests = parse_stat_requests(&args.stats, &headers, false, args.allow_dups)?;
 
         for record in reader.records() {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
@@ -716,7 +721,12 @@ fn parse_group_indices(
     }
 }
 
-fn expand_target_columns(spec: &str, headers: &[String], no_header: bool) -> Result<Vec<usize>> {
+fn expand_target_columns(
+    spec: &str,
+    headers: &[String],
+    no_header: bool,
+    allow_duplicates: bool,
+) -> Result<Vec<usize>> {
     let mut indices = Vec::new();
     for token in spec.split(',') {
         let token = token.trim();
@@ -726,7 +736,11 @@ fn expand_target_columns(spec: &str, headers: &[String], no_header: bool) -> Res
         let parts: Vec<&str> = token.split(':').collect();
         if parts.len() == 1 {
             let selectors = parse_selector_list(token)?;
-            let resolved = resolve_selectors(headers, &selectors, no_header)?;
+            let resolved = if allow_duplicates {
+                resolve_selectors_allow_duplicates(headers, &selectors, no_header)?
+            } else {
+                resolve_selectors(headers, &selectors, no_header)?
+            };
             indices.extend(resolved);
         } else if parts.len() == 2 {
             let start_part = parts[0].trim();
@@ -768,6 +782,7 @@ fn parse_stat_requests(
     specs: &[String],
     headers: &[String],
     no_header: bool,
+    allow_duplicates: bool,
 ) -> Result<Vec<StatRequest>> {
     if specs.is_empty() {
         bail!("at least one --stat specification is required");
@@ -779,7 +794,8 @@ fn parse_stat_requests(
             .split_once('=')
             .or_else(|| spec.split_once(':'))
             .with_context(|| format!("expected COLUMN=ops in '{}'", spec))?;
-        let column_indices = expand_target_columns(column_part.trim(), headers, no_header)?;
+        let column_indices =
+            expand_target_columns(column_part.trim(), headers, no_header, allow_duplicates)?;
 
         let ops = ops_part
             .split(',')
@@ -1064,9 +1080,9 @@ mod tests {
             "c".to_string(),
             "d".to_string(),
         ];
-        let end_open = expand_target_columns("2:", &headers, false).unwrap();
+        let end_open = expand_target_columns("2:", &headers, false, false).unwrap();
         assert_eq!(end_open, vec![1, 2, 3]);
-        let start_open = expand_target_columns(":3", &headers, false).unwrap();
+        let start_open = expand_target_columns(":3", &headers, false, false).unwrap();
         assert_eq!(start_open, vec![0, 1, 2]);
     }
 
