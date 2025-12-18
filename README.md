@@ -34,8 +34,8 @@
 
 ### Key features
 - Stream-friendly processing; every command reads from files or standard input and writes to standard output.
-- Column selectors that accept names, 1-based indices, ranges, and multi-file specifications.
-- Expression language with arithmetic, comparisons, logical operators, regex matching, and numeric helper functions.
+- Column selectors that accept names, 1-based indices, ranges, regexes, and multi-file specifications.
+- Expression language with arithmetic, comparisons, logical operators, list membership, regex matching, and numeric helper functions.
 - Aggregations for grouped summaries (`summarize`) and row-wise calculations (`mutate`).
 - Excel tooling to inspect, preview, export, and assemble `.xlsx` workbooks.
 
@@ -120,14 +120,17 @@ Selectors are reused in `cut`, `filter`, `join`, `mutate`, `summarize`, and othe
 | `index` | 1-based column index. | `1,4,9` |
 | `-index` | Column counted from the end (1 = last). | `-1,-2` |
 | `start:end` | Inclusive range by name or index. Supports open ends. | `IL6:IL10`, `2:5`, `:IL10`, `IL6:` |
+| `~"regex"` | Columns whose names match the regular expression. Requires headers. | `~"^sample_"` |
 | `:` | Select every column in order. | `-f ':'` |
-| `mixed` | Combine names, indices, and ranges. | `sample_id,3:5,tech` |
+| `mixed` | Combine names, indices, ranges, and regexes. | `sample_id,3:5,~"_pct$"` |
 | `multi-file` | Separate selectors for each input with semicolons (primarily `join`). | `sample_id;subject_id` |
 | `range in expressions` | Prefixed with `$` to access a slice of values. | `$IL6:$IL10` |
 
 > Wrap selectors in backticks or braces to treat punctuation literally. For example, ``-f '`IL6:IL10`,`total,reads`'`` or `-f '{IL6:IL10},{total,reads}'` selects columns named `IL6:IL10` and `total,reads` instead of expanding a range or splitting on the comma.
 
-Negative indices are also valid inside ranges: `:-2` selects every column except the final two, while `-3:` keeps the last three columns.
+Negative indices are also valid inside ranges: `:-2` selects every column except the final two, while `-3:` keeps the last three columns. Regex selectors deduplicate by first match; add `--allow-dups` (or `-D`) on `cut`/`summarize` when you need repeated columns.
+
+> Regex selectors require a header row. When `-H/--no-header` is active, using `~"..."` results in an error with guidance to remove the regex or restore headers.
 
 Anywhere you access column *values* inside an expression, prefix the selector with `$` (`$purity`, `$1`, `$IL6:$IL10`).
 
@@ -152,8 +155,12 @@ The same expression language powers `filter -e`, `mutate -e name=EXPR`, and rege
 | `!` / `not` | Logical negation. | Booleans |
 | `~` | Regex match. Right-hand side can be literal text or a `$range`. | Strings |
 | `!~` | Regex does *not* match. | Strings |
+| `in` | Membership test against a list literal or numeric range. | `$group in ["case","control"]` |
+| `!in` | Negated membership test. | `$status !in ["fail","missing"]` |
 
 > Reference columns whose names contain operators or punctuation with `${column-name}` inside expressions (e.g. `${dna-} - $rna_ug`). This prevents the parser from treating the characters as arithmetic.
+
+List literals use square brackets: `[1,2,3]`, `["case","control"]`, `[IL6:IL10]`. Combine them with `in`/`!in` to test membership, or pass them to helper functions that accept lists.
 
 **Numeric helper functions**
 
@@ -228,11 +235,23 @@ Ranges expand consecutive columns automatically:
 tsvkit cut -f 'sample_id,IL6:IL10' examples/cytokines.tsv
 ```
 
+Regex selectors pick up columns whose headers match a pattern. Combine them with names, indices, and ranges in any order:
+
+```bash
+tsvkit cut -f '1,group,~"^IL",~"_pct$"' examples/qc.tsv
+```
+
+Matches deduplicate by default; add `-D/--allow-dups` to keep every occurrence when multiple selectors target the same column.
+
 ### `filter`
-Filter rows with boolean logic, arithmetic, column ranges, and regexes.
+Filter rows with boolean logic, arithmetic, column ranges, regexes, and list membership tests.
 
 ```bash
 tsvkit filter -e '$group == "case" & $purity >= 0.94' examples/samples.tsv
+```
+
+```bash
+tsvkit filter -e '$status !in ["fail","missing","error"] & $tech ~ "sRNA"' examples/samples.tsv
 ```
 
 **Expression building blocks for `filter`**
@@ -248,6 +267,7 @@ tsvkit filter -e '$group == "case" & $purity >= 0.94' examples/samples.tsv
 | Row-wise aggregators | `sum($dna_ug:$rna_ug)`, `mode($1,$3)`, `countunique($gene:)` | Same catalog as [`summarize`](#summarize): totals, quantiles (`q*` / `p*`), variance/SD, products, entropy, argmin/argmax, membership stats. Works with ranges, lists, and open selectors. |
 | Regex match | `$tech ~ "sRNA"`, `$notes !~ "(?i)fail"` | Patterns follow Rust `regex` syntax. `(?i)` enables case-insensitive matching. |
 | Regex across ranges | `$gene:$notes ~ "kinase"`, `~ "control"` | When the left-hand side is omitted, `~` scans all columns. |
+| Membership | `$group in ["case","control"]`, `$rank in [1:3]` | Right-hand side must be a list literal or numeric range. |
 
 **Regex usage at a glance**
 
@@ -327,6 +347,12 @@ tsvkit summarize \
   -s 'purity=mean,sd' \
   -s 'dna_ug:contamination_pct=q1,q3' \
   examples/samples.tsv
+```
+
+Regex selectors work here as well, so you can summarize whole families of columns in one shot:
+
+```bash
+tsvkit summarize -g patient -s '~"^sample_"=mean,sd' -D cohort.tsv
 ```
 
 **Aggregators supported by `summarize`**
