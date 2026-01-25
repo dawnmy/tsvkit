@@ -241,6 +241,25 @@ Regex selectors pick up columns whose headers match a pattern. Combine them with
 tsvkit cut -f '1,group,~"^IL",~"_pct$"' examples/qc.tsv
 ```
 
+Injecting the source file basename (`__base__`) or filename with path (`__file__`):
+
+```bash
+tsvkit cut -f '__base__,1:' examples/qc*.tsv
+```
+
+Explanation:
+
+-	`__base__` injects the source filename as the first column
+-	`1:` selects all existing columns from each input file
+
+You can use `--file-col` or `--fc` to define a custom column name for the injected column. For example, 
+
+```bash
+tsvkit cut --fc sample -f '__base__,1:' examples/qc*.tsv
+```
+The column name will be "sample" not "__base__" in the output.
+
+
 Matches deduplicate by default; add `-D/--allow-dups` to keep every occurrence when multiple selectors target the same column.
 
 ### `filter`
