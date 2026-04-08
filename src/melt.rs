@@ -13,7 +13,22 @@ use crate::common::{
 #[derive(Args, Debug)]
 #[command(
     about = "Melt wide TSV tables into long form",
-    long_about = "Convert wide TSV tables into a tidy long format. Use -i/--id to keep identifier columns, optionally -v/--value-cols to target specific value columns, and rename the generated columns with --variable/--value. Defaults to header-aware mode; add -H for headerless files.\n\nExample:\n  tsvkit melt -i id examples/profiles.tsv"
+    long_about = "Convert wide TSV tables into a tidy long format. Use -i/--id to keep identifier columns, optionally -v/--value-cols to target specific value columns, and rename the generated columns with --variable/--value. Defaults to header-aware mode; add -H for headerless files.\n\nExample:\n  tsvkit melt -i id examples/profiles.tsv",
+    after_help = "Use cases:
+  Keep subject metadata while melting assay columns:
+    tsvkit melt -i 'sample_id,group' -v 'IL6:IL10' cytokines.tsv
+  Melt all non-id columns:
+    tsvkit melt -i id profiles.tsv
+  Headerless matrix:
+    tsvkit melt -H -i 1 -v 2: raw.tsv
+
+Column naming:
+  --variable sets the output column storing former header names.
+  --value sets the output column storing cell values.
+
+Tip:
+  `melt` is commonly paired with `pivot`:
+    tsvkit melt -i id wide.tsv | tsvkit pivot -i id -c variable -v value"
 )]
 pub struct MeltArgs {
     /// Input TSV file (use '-' for stdin; gz/xz supported)

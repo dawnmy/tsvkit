@@ -49,7 +49,12 @@ Examples:
   tsvkit cut --inject-col-names file_name,sample -f '{base:},sample={base:#sample_!upper},1:2' sample_A.tsv
   tsvkit cut -H -f '3,1,-1' data.tsv
   tsvkit cut -C ';' -E -I -f '1:3' dirty.tsv
-  tsvkit cut -D -f 'value,~\"^value$\"' duplicated_headers.tsv"
+  tsvkit cut -D -f 'value,~\"^value$\"' duplicated_headers.tsv
+
+Practical tips:
+  - Use -f first, then pipe into filter/summarize/sort for analysis workflows.
+  - Use regex selectors (~\"...\") to keep evolving column groups (e.g. assays).
+  - Use template/injected selectors to preserve provenance when concatenating files."
 )]
 pub struct CutArgs {
     /// Input TSV file(s) (use '-' for stdin; supports gz/xz)

@@ -15,7 +15,22 @@ use crate::expression::{bind_expression, evaluate, parse_expression};
 Examples:
   tsvkit filter -e '$sample2>=5 & $sample3!=9' examples/profiles.tsv
   tsvkit filter -e '$kingdom ~ "^Bact"' examples/abundance.tsv
-  tsvkit filter -e 'log2($coverage) > 10' reads.tsv"#
+  tsvkit filter -e 'log2($coverage) > 10' reads.tsv"#,
+    after_help = "More expression patterns:
+  Numeric range:
+    tsvkit filter -e '$score >= 0.8 & $score <= 0.95' data.tsv
+  Membership:
+    tsvkit filter -e '$group in [\"case\",\"control\"]' data.tsv
+  Negation:
+    tsvkit filter -e '!($status == \"failed\")' data.tsv
+  Row-wise aggregate filter:
+    tsvkit filter -e 'mean($sample1:$sample5) > 10' data.tsv
+
+Tips:
+  - Always quote expressions so your shell does not expand `$col`.
+  - Prefer double quotes for string literals inside expressions.
+  - In -H mode, use `$1`, `$2`, ... selectors.
+  - `filter` emits headers only when at least one row matches."
 )]
 pub struct FilterArgs {
     /// Input TSV file (use '-' for stdin; compressed files supported)

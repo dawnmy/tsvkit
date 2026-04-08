@@ -21,7 +21,19 @@ Examples:
   tsvkit mutate -e "coverage_sum=sum($1,$3:$5)" examples/profiles.tsv
   tsvkit mutate -e "log_counts=mean($count1:$count5)" counts.tsv
   tsvkit mutate -e "title_clean=sub($title,\"\\s+\", \"_\")" titles.tsv
-  tsvkit mutate -e 's/$col1:$col3/NA/0/' data.tsv"#
+  tsvkit mutate -e 's/$col1:$col3/NA/0/' data.tsv"#,
+    after_help = "Mutation patterns:
+  Add new columns (evaluated left-to-right):
+    tsvkit mutate -e 'total=$a+$b' -e 'ratio=$a/$total' data.tsv
+  Recode text in place:
+    tsvkit mutate -e 's/$group/^ctrl$/control/' data.tsv
+  Combine assignment + substitution:
+    tsvkit mutate -e 'score_z=($score-mean($score))/sd($score)' -e 's/$status/NA/unknown/' data.tsv
+
+Important notes:
+  - Always prefix column references with `$`.
+  - New columns created in earlier -e expressions can be used in later ones.
+  - Use single quotes around -e arguments to protect `$...` from shell expansion."
 )]
 pub struct MutateArgs {
     /// Input TSV file (use '-' for stdin; gz/xz supported)
