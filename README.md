@@ -355,15 +355,18 @@ tsvkit join \
 
 Formatting rules: split files with `;`, columns with `,`, and keep counts aligned with `-F` for each file. Template tokens are shared with `cut --file-col`.
 
-When using `-H` (no input header) together with `--add-header`, `join` now emits a header row:
-- join-key columns are named `index1`, `index2`, ..., `indexN`
+When using `-H` (no input header) together with `--add-header`, `join` emits a header row:
+- join-key columns are named `index1`, `index2`, ..., `indexN` by default
 - non-key columns use your `--add-header` templates.
+
+Use `--key-header` (alias `--index-name`) to rename join-key columns explicitly. Provide comma-separated names and match the number of join columns.
 
 Example:
 
 ```bash
 tsvkit join -H \
   -f '1;1' \
+  --key-header 'sample_id' \
   --add-header 'patient_{base:#sample_}' \
   sample_A.tsv sample_B.tsv
 ```
@@ -529,10 +532,11 @@ tsvkit slice -r 1,4:5 examples/samples.tsv
 ```
 
 ### `head`
-Pretty-print the first rows of one or multiple TSV files. Default is `-n 10`; each input block starts with `# <file>`.
+Print the first rows from TSV input (default `-n 10`). With one input (including stdin), output is plain TSV with no file banner; with multiple files, each block is prefixed by `# <file>`.
 
 ```bash
 tsvkit head -n 5 examples/samples.tsv examples/subjects.tsv
+cat examples/samples.tsv | tsvkit head -n 3
 ```
 
 ### `pretty`

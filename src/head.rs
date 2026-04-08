@@ -1,16 +1,15 @@
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::common::{InputOptions, inconsistent_width_error, should_skip_record};
-use crate::pretty::render_table;
 
 #[derive(Args, Debug)]
-#[command(about = "Preview first rows in pretty format")]
+#[command(about = "Print first rows from TSV input")]
 pub struct HeadArgs {
-    #[arg(value_name = "FILES", num_args = 1..)]
+    #[arg(value_name = "FILES", default_value = "-", num_args = 0..)]
     pub files: Vec<PathBuf>,
 
     #[arg(short = 'n', long = "lines", default_value_t = 10)]
@@ -36,33 +35,37 @@ pub fn run(args: HeadArgs) -> Result<()> {
         args.ignore_illegal_row,
     )?;
 
+    let mut writer = BufWriter::new(io::stdout().lock());
+    let show_file_banner = args.files.len() > 1;
+
     for (idx, file) in args.files.iter().enumerate() {
         if idx > 0 {
-            println!();
+            writeln!(writer)?;
         }
-        println!("# {}", file.display());
+        if show_file_banner {
+            writeln!(writer, "# {}", file.display())?;
+        }
 
         let mut reader = crate::common::reader_for_path(file, args.no_header, &input_opts)?;
         let source_name = format!("\"{}\"", file.display());
-        let header = if args.no_header {
-            None
-        } else {
-            Some(
-                reader
-                    .headers()
-                    .with_context(|| format!("failed reading header from {}", source_name))?
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>(),
-            )
-        };
-        let mut rows = Vec::new();
-        let mut reference_width = header.as_ref().map(|h| h.len());
-        let header_rows = if header.is_some() { 1 } else { 0 };
+        let mut reference_width = None;
+        let mut header_rows = 0usize;
+        if !args.no_header {
+            let header = reader
+                .headers()
+                .with_context(|| format!("failed reading header from {}", source_name))?
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            reference_width = Some(header.len());
+            header_rows = 1;
+            writeln!(writer, "{}", header.join("\t"))?;
+        }
         let mut row_number = 0usize;
+        let mut emitted_rows = 0usize;
 
         for record in reader.records() {
-            if rows.len() >= args.lines {
+            if emitted_rows >= args.lines {
                 break;
             }
             let record = record.with_context(|| format!("failed reading from {}", source_name))?;
@@ -86,12 +89,15 @@ pub fn run(args: HeadArgs) -> Result<()> {
             if reference_width.is_none() {
                 reference_width = Some(record.len());
             }
-            rows.push(record.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            writeln!(
+                writer,
+                "{}",
+                record.iter().collect::<Vec<_>>().join("\t")
+            )?;
+            emitted_rows += 1;
         }
-
-        render_table(header, rows)?;
-        io::stdout().flush()?;
     }
 
+    writer.flush()?;
     Ok(())
 }
