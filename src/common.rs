@@ -989,12 +989,18 @@ fn resolve_selector_index(
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File};
+    use std::io::{Read, Write};
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use flate2::{Compression, write::GzEncoder};
+    use xz2::write::XzEncoder;
 
     use super::{
         ColumnSelector, FileTemplateContext, SpecialColumn, parse_selector_list,
-        parse_selector_list_with_templates, parse_single_selector, render_file_template,
-        resolve_selectors, resolve_selectors_allow_duplicates,
+        open_path_reader, parse_selector_list_with_templates, parse_single_selector,
+        render_file_template, resolve_selectors, resolve_selectors_allow_duplicates,
     };
 
     #[test]
@@ -1182,5 +1188,53 @@ mod tests {
         assert_eq!(indices, vec![0]);
         let indices = resolve_selectors_allow_duplicates(&headers, &selectors, false).unwrap();
         assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn open_path_reader_reads_gzip_files() {
+        let payload = b"a\tb\n1\t2\n";
+        let path = unique_temp_path("common_reader_gz", "tsv.gz");
+
+        {
+            let file = File::create(&path).unwrap();
+            let mut encoder = GzEncoder::new(file, Compression::default());
+            encoder.write_all(payload).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let mut reader = open_path_reader(&path).unwrap();
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+        assert_eq!(out, payload);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn open_path_reader_reads_xz_files() {
+        let payload = b"a\tb\n1\t2\n";
+        let path = unique_temp_path("common_reader_xz", "tsv.xz");
+
+        {
+            let file = File::create(&path).unwrap();
+            let mut encoder = XzEncoder::new(file, 6);
+            encoder.write_all(payload).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let mut reader = open_path_reader(&path).unwrap();
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+        assert_eq!(out, payload);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    fn unique_temp_path(prefix: &str, suffix: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{nanos}.{suffix}"))
     }
 }

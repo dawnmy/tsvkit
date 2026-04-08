@@ -19,7 +19,7 @@ type CellValue = Data;
 #[derive(Args, Debug)]
 #[command(
     about = "Interact with Excel workbooks",
-    long_about = "Inspect, preview, export, or build Excel workbooks (.xlsx).\n\n`tsvkit excel` has 4 mutually exclusive modes:\n  --sheets FILE    list sheet metadata (name, size, inferred types)\n  --preview FILE   show first rows from selected sheets\n  --dump FILE      export selected sheet as TSV\n  --load TSV ...   create a workbook from TSV input(s)",
+    long_about = "Inspect, preview, export, or build Excel workbooks (.xlsx).\n\n`tsvkit excel` has 4 mutually exclusive modes:\n  --sheets FILE    list sheet metadata (name, size, inferred types)\n  --preview FILE   show first rows from selected sheets\n  --dump FILE      export selected sheet as TSV\n  --load TSV ...   create a workbook from TSV input(s), including `.tsv`, `.tsv.gz`, and `.tsv.xz`",
     after_help = "Common workflows:
   1) Inspect workbook structure
      tsvkit excel --sheets examples/bioinfo_example.xlsx
@@ -67,7 +67,7 @@ pub struct ExcelArgs {
     #[arg(long = "dump", value_name = "FILE", conflicts_with_all = ["sheets", "preview", "load"])]
     pub dump: Option<PathBuf>,
 
-    /// TSV inputs to load into a new workbook (repeatable)
+    /// TSV inputs to load into a new workbook (repeatable; `.tsv`, `.tsv.gz`, `.tsv.xz` supported)
     #[arg(long = "load", value_name = "TSV", action = ArgAction::Append, conflicts_with_all = ["sheets", "preview", "dump"])]
     pub load: Vec<PathBuf>,
 
