@@ -30,18 +30,27 @@ pub enum ColumnSelector {
     FromEnd(usize),
     Name(String),
     Regex(String),
+    Template(String),
     Range(Option<Box<ColumnSelector>>, Option<Box<ColumnSelector>>),
     Special(SpecialColumn),
 }
 
 pub fn parse_selector_list(spec: &str) -> Result<Vec<ColumnSelector>> {
+    parse_selector_list_impl(spec, false)
+}
+
+pub fn parse_selector_list_with_templates(spec: &str) -> Result<Vec<ColumnSelector>> {
+    parse_selector_list_impl(spec, true)
+}
+
+fn parse_selector_list_impl(spec: &str, braces_as_templates: bool) -> Result<Vec<ColumnSelector>> {
     if spec.trim().is_empty() {
         bail!("column specification must not be empty");
     }
 
     tokenize_selector_spec(spec)?
         .into_iter()
-        .map(parse_selector_token)
+        .map(|token| parse_selector_token(token, braces_as_templates))
         .collect()
 }
 
@@ -135,6 +144,12 @@ fn resolve_selectors_with_options(
                 let mut resolved =
                     resolve_selector_indices(headers, selector, no_header, allow_duplicates)?;
                 indices.append(&mut resolved);
+            }
+            ColumnSelector::Template(template) => {
+                bail!(
+                    "template selector '{{{}}}' cannot be resolved as a positional index",
+                    template
+                );
             }
             ColumnSelector::Range(start, end) => {
                 if headers.is_empty() {
@@ -350,9 +365,9 @@ fn expand_file_token(token: &str, ctx: &FileTemplateContext) -> Result<String> {
     };
 
     let mut value = match core {
-        "file" => ctx.path.clone(),
-        "base" => ctx.base.clone(),
-        "dir" => ctx.dir.clone(),
+        "file" | "__file__" => ctx.path.clone(),
+        "base" | "__base__" => ctx.base.clone(),
+        "dir" | "__dir__" => ctx.dir.clone(),
         _ => {
             let source;
             let mut actions = String::new();
@@ -362,7 +377,16 @@ fn expand_file_token(token: &str, ctx: &FileTemplateContext) -> Result<String> {
                     continue;
                 }
             }
-            if core.starts_with("base") {
+            if core.starts_with("__base__") {
+                source = "base";
+                actions = core["__base__".len()..].to_string();
+            } else if core.starts_with("__dir__") {
+                source = "dir";
+                actions = core["__dir__".len()..].to_string();
+            } else if core.starts_with("__file__") {
+                source = "file";
+                actions = core["__file__".len()..].to_string();
+            } else if core.starts_with("base") {
                 source = "base";
                 actions = core["base".len()..].to_string();
             } else if core.starts_with("dir") {
@@ -491,7 +515,7 @@ fn capitalize_first(input: &str) -> String {
     }
 }
 
-fn parse_selector_token(token: SelectorToken) -> Result<ColumnSelector> {
+fn parse_selector_token(token: SelectorToken, braces_as_templates: bool) -> Result<ColumnSelector> {
     if token.text.is_empty() {
         return Err(anyhow!("empty column selector"));
     }
@@ -508,20 +532,26 @@ fn parse_selector_token(token: SelectorToken) -> Result<ColumnSelector> {
         let start_selector = if start_trim.is_empty() {
             None
         } else {
-            Some(Box::new(parse_simple_selector(start_trim)?))
+            Some(Box::new(parse_simple_selector(
+                start_trim,
+                braces_as_templates,
+            )?))
         };
         let end_selector = if end_trim.is_empty() {
             None
         } else {
-            Some(Box::new(parse_simple_selector(end_trim)?))
+            Some(Box::new(parse_simple_selector(
+                end_trim,
+                braces_as_templates,
+            )?))
         };
         return Ok(ColumnSelector::Range(start_selector, end_selector));
     }
 
-    parse_simple_selector(&token.text)
+    parse_simple_selector(&token.text, braces_as_templates)
 }
 
-fn parse_simple_selector(token: &str) -> Result<ColumnSelector> {
+fn parse_simple_selector(token: &str, braces_as_templates: bool) -> Result<ColumnSelector> {
     if token.is_empty() {
         return Err(anyhow!("empty column selector"));
     }
@@ -532,6 +562,9 @@ fn parse_simple_selector(token: &str) -> Result<ColumnSelector> {
         return Ok(ColumnSelector::Name(literal));
     }
     if let Some(literal) = parse_brace_literal(token)? {
+        if braces_as_templates {
+            return Ok(ColumnSelector::Template(literal));
+        }
         return Ok(ColumnSelector::Name(literal));
     }
     match token {
@@ -882,6 +915,10 @@ fn resolve_selector_indices(
             }
             Ok(matches)
         }
+        ColumnSelector::Template(template) => bail!(
+            "template selector '{{{}}}' cannot be resolved as a positional index",
+            template
+        ),
         ColumnSelector::Range(_, _) => unreachable!("range selectors handled separately"),
         ColumnSelector::Special(special) => bail!(
             "special column '{}' not supported without column injection",
@@ -934,6 +971,12 @@ fn resolve_selector_index(
         ColumnSelector::Regex(_) => {
             bail!("regex column selectors cannot be used in range endpoints")
         }
+        ColumnSelector::Template(template) => {
+            bail!(
+                "template selector '{{{}}}' cannot be used in range endpoints",
+                template
+            )
+        }
         ColumnSelector::Special(special) => bail!(
             "special column '{}' not supported without column injection",
             special.default_header()
@@ -950,8 +993,8 @@ mod tests {
 
     use super::{
         ColumnSelector, FileTemplateContext, SpecialColumn, parse_selector_list,
-        parse_single_selector, render_file_template, resolve_selectors,
-        resolve_selectors_allow_duplicates,
+        parse_selector_list_with_templates, parse_single_selector, render_file_template,
+        resolve_selectors, resolve_selectors_allow_duplicates,
     };
 
     #[test]
@@ -1054,6 +1097,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_brace_templates_when_enabled() {
+        let selectors = parse_selector_list_with_templates("{base:},plain").unwrap();
+        assert!(matches!(selectors[0], ColumnSelector::Template(ref name) if name == "base:"));
+        assert!(matches!(selectors[1], ColumnSelector::Name(ref name) if name == "plain"));
+    }
+
+    #[test]
     fn parses_negative_indices() {
         let headers = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let selectors = parse_selector_list("-1,-2").unwrap();
@@ -1087,6 +1137,8 @@ mod tests {
             render_file_template("{file^.tsv}", &ctx).unwrap(),
             "/tmp/a.b.c"
         );
+        assert_eq!(render_file_template("{__file__%:}", &ctx).unwrap(), "a");
+        assert_eq!(render_file_template("{__base__.}", &ctx).unwrap(), "a.b.c");
     }
 
     #[test]

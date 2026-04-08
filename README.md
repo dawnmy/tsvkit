@@ -259,22 +259,26 @@ Explanation:
 -	`__base__` injects the source filename as the first column
 -	`1:` selects all existing columns from each input file
 
-You can use `--file-col` or `--fc` to define a custom column name for the injected column. For example, 
+You can now inject file-derived values directly in `-f` with template selectors:
 
 ```bash
-tsvkit cut --fc sample -f '__base__,1:' examples/qc*.tsv
+tsvkit cut -f '{file},{base:},1:2' examples/qc.tsv
+tsvkit cut -f 'sample={base:#sample_!lower},1:' sample_A.tsv
 ```
-The column name will be "sample" not "__base__" in the output.
 
-`--file-col` now also accepts file-template expressions so injected values can be derived from paths:
+Use `--inject-col-names` (aliases: `--file-col`, `--fc`) to rename injected columns.
+If you have multiple injected selectors in `-f`, pass comma-separated names in order:
 
 ```bash
-tsvkit cut --file-col '{base:}' -f '__file__,1:2' examples/qc.tsv
+tsvkit cut --inject-col-names sample -f '__base__,1:' examples/qc*.tsv
+tsvkit cut --inject-col-names file_name,sample -f '{base:},sample={base:#sample_!upper},1:2' sample_A.tsv
 ```
 
 Template tokens:
 
-- `{file}` full path, `{base}` basename, `{dir}` parent dir
+- `{file}` / `{__file__}` full path
+- `{base}` / `{__base__}` basename
+- `{dir}` / `{__dir__}` parent dir
 - `{base:}` basename without all extensions
 - `{base.}` basename without last extension
 - `{file%}` basename of `{file}`
@@ -282,6 +286,8 @@ Template tokens:
 - `{file^suffix}` remove a literal trailing suffix when present
 - `{base:#prefix}` remove a literal prefix when present (example: `{base:#sample_}`)
 - case controls: append `!upper`, `!lower`, or `!cap` (for example `{base:!upper}`)
+
+> Shell tip: `!` is interpreted by many shells in double quotes. Use **single quotes** for selector/template expressions like `'{base:!lower},1:3'` or `'sample={base:!lower},1:'`. If you must use double quotes, escape it: `"{base:\!lower}"`.
 
 Negative selectors in `cut -f`:
 
@@ -291,6 +297,13 @@ Negative selectors in `cut -f`:
 
 
 Matches deduplicate by default; add `-D/--allow-dups` to keep every occurrence when multiple selectors target the same column.
+
+Useful operational flags:
+
+- `-H/--no-header` for headerless TSVs (selectors are index-based)
+- `-C/--comment-char` to skip comment lines (default `#`)
+- `-E/--ignore-empty-row` to skip blank rows
+- `-I/--ignore-illegal-row` to skip rows with inconsistent column counts
 
 ### `filter`
 Filter rows with boolean logic, arithmetic, column ranges, regexes, and list membership tests.
@@ -353,7 +366,7 @@ tsvkit join \
   examples/samples.tsv examples/subjects.tsv
 ```
 
-Formatting rules: split files with `;`, columns with `,`, and keep counts aligned with `-F` for each file. Template tokens are shared with `cut --file-col`.
+Formatting rules: split files with `;`, columns with `,`, and keep counts aligned with `-F` for each file. Template tokens are shared with `cut -f '{...}'` template selectors.
 
 When using `-H` (no input header) together with `--add-header`, `join` emits a header row:
 - join-key columns are named `index1`, `index2`, ..., `indexN` by default
