@@ -5,8 +5,9 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::common::{
-    ColumnSelector, InputOptions, SpecialColumn, default_headers, parse_selector_list,
-    reader_for_path, resolve_selectors, resolve_selectors_allow_duplicates, should_skip_record,
+    ColumnSelector, FileTemplateContext, InputOptions, SpecialColumn, default_headers,
+    parse_selector_list, reader_for_path, render_file_template, resolve_selectors,
+    resolve_selectors_allow_duplicates, should_skip_record,
 };
 
 #[derive(Args, Debug)]
@@ -20,7 +21,13 @@ pub struct CutArgs {
     pub files: Vec<PathBuf>,
 
     /// Fields to select, using names, 1-based indices, ranges (`colA:colD`, `2:5`), regex (`~"^sample"`), or mixes. Comma-separated list.
-    #[arg(short = 'f', long = "fields", value_name = "COLS", required = true)]
+    #[arg(
+        short = 'f',
+        long = "fields",
+        value_name = "COLS",
+        required = true,
+        allow_hyphen_values = true
+    )]
     pub fields: String,
 
     /// Rename the injected file column when using `__file__` or `__base__`
@@ -67,7 +74,7 @@ pub fn run(args: CutArgs) -> Result<()> {
 
     for path in &args.files {
         let mut reader = reader_for_path(path, args.no_header, &input_opts)?;
-        let file_info = FileInfo::from_path(path);
+        let file_info = FileInfo::from_path(path).with_template(args.file_col.as_deref());
 
         if args.no_header {
             process_no_header_file(
@@ -191,15 +198,11 @@ fn emit_record(
     let mut fields = Vec::with_capacity(columns.len());
     for column in columns {
         match column {
-            CutColumn::Index(idx) => fields.push(record.get(*idx).unwrap_or("")),
-            CutColumn::Injected(special) => fields.push(file_info.value_for(*special)),
+            CutColumn::Index(idx) => fields.push(record.get(*idx).unwrap_or("").to_string()),
+            CutColumn::Injected(special) => fields.push(file_info.rendered_value_for(*special)?),
         }
     }
-    if !fields.is_empty() {
-        writeln!(writer, "{}", fields.join("\t"))?;
-    } else {
-        writer.write_all(b"\n")?;
-    }
+    writeln!(writer, "{}", fields.join("\t"))?;
     Ok(())
 }
 
@@ -245,34 +248,31 @@ fn build_cut_columns(
 
 #[derive(Clone)]
 struct FileInfo {
-    path: String,
-    base: String,
+    context: FileTemplateContext,
+    template: Option<String>,
 }
 
 impl FileInfo {
     fn from_path(path: &Path) -> Self {
-        if path == Path::new("-") {
-            return FileInfo {
-                path: "-".to_string(),
-                base: "-".to_string(),
-            };
-        }
-        let path_str = path.to_string_lossy().into_owned();
-        let base = path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path_str.clone());
         FileInfo {
-            path: path_str,
-            base,
+            context: FileTemplateContext::from_path(path),
+            template: None,
         }
     }
 
-    fn value_for(&self, special: SpecialColumn) -> &str {
-        match special {
-            SpecialColumn::FilePath => self.path.as_str(),
-            SpecialColumn::FileBase => self.base.as_str(),
+    fn with_template(mut self, template: Option<&str>) -> Self {
+        self.template = template.map(|s| s.to_string());
+        self
+    }
+
+    fn rendered_value_for(&self, special: SpecialColumn) -> Result<String> {
+        if let Some(template) = &self.template {
+            return render_file_template(template, &self.context);
         }
+        Ok(match special {
+            SpecialColumn::FilePath => self.context.path.clone(),
+            SpecialColumn::FileBase => self.context.base.clone(),
+        })
     }
 }
 
