@@ -16,7 +16,21 @@ use crate::common::{
 #[derive(Args, Debug)]
 #[command(
     about = "Join multiple TSV files on shared key columns",
-    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Use -F/--select to control which non-key columns are emitted per file (wrap multi-file specs in quotes). Keys default to an inner join; adjust with -k/--keep. Control parallel input loading with -t/--threads (defaults to min(8, available CPUs)). When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f subject_id;subject_id -F 'sample_id,group;age,sex' examples/samples.tsv examples/subjects.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv"
+    long_about = "Join two or more TSV files on one or more key columns. Provide selectors with -f/--fields (comma-separated list; use semicolons to give per-file specs). Each file must contribute the same number of key columns. Use -F/--select to control which non-key columns are emitted per file (wrap multi-file specs in quotes). Keys default to an inner join; adjust with -k/--keep. Control parallel input loading with -t/--threads (defaults to min(8, available CPUs)). When inputs are pre-sorted by the key, add --sorted to stream without buffering.\n\nExamples:\n  tsvkit join -f id examples/metadata.tsv examples/abundance.tsv\n  tsvkit join -f 'sample_id,taxon;id,taxon_id' file1.tsv file2.tsv\n  tsvkit join -f subject_id;subject_id -F 'sample_id,group;age,sex' examples/samples.tsv examples/subjects.tsv\n  tsvkit join -f id -k 0 examples/metadata.tsv examples/abundance.tsv",
+    after_help = "Join mode guide:
+  default (inner): keep keys present in every file
+  -k 0           : full outer join (keep union of keys)
+  -k 1,3         : keep keys present in file1 or file3 (plus standard matches)
+
+Field spec guide:
+  -f 'id;id'                 -> join file1.id with file2.id
+  -f 'a,b;x,y'               -> 2-column key join
+  -F 'name,group;count'      -> choose emitted non-key columns per file
+  --add-header 'meta_{base},abund_{base}' -> custom output header templates
+
+Performance tips:
+  Use --sorted when all inputs are already sorted by join keys.
+  Use -t to tune parallel loading for very large datasets."
 )]
 pub struct JoinArgs {
     /// Input TSV files to join (use '-' to read from stdin; `.tsv`, `.tsv.gz`, `.tsv.xz` all supported)

@@ -13,7 +13,20 @@ use crate::common::{InputOptions, reader_for_path, should_skip_record};
 
 Examples:
   tsvkit slice -r 1,10:20 examples/profiles.tsv
-  tsvkit slice -H -r 5:10 raw.tsv"#
+  tsvkit slice -H -r 5:10 raw.tsv"#,
+    after_help = "Row selector patterns:
+  7        -> single row
+  10:20    -> inclusive range
+  :50      -> from first row through 50
+  100:     -> from row 100 to end
+  -1       -> last row
+  -10:     -> last 10 rows
+  1,5,9:12 -> mixed selectors
+
+Tips:
+  Header mode (default): header is printed once before selected rows.
+  No-header mode (-H): emits only selected data rows.
+  From-end selectors require buffering to know total row count."
 )]
 pub struct SliceArgs {
     /// Input TSV file (use '-' for stdin; gz/xz supported)

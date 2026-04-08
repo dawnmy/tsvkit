@@ -10,7 +10,25 @@ use crate::common::{InputOptions, reader_for_path, should_skip_record};
 #[derive(Args, Debug)]
 #[command(
     about = "Inspect TSV dimensions, column types, and value previews",
-    long_about = r#"Report the table shape and column details for a TSV file (or stdin). The output starts with #shape(rows, cols) followed by a TSV summary listing each column's index, optional name, inferred type (num/date/str), and the first N observed values (default 3). Respects shared options like -H/--no-header, -C/--comment-char, -E/--ignore-empty-row, and -I/--ignore-illegal-row."#
+    long_about = r#"Report table shape and per-column profile details for a TSV file (or stdin). Output starts with #shape(rows, cols), followed by a summary table containing each column's index, optional name, inferred type (num/date/str), and the first N observed values (default 3)."#,
+    after_help = "Examples:
+  tsvkit info examples/profiles.tsv
+  tsvkit info -n 5 examples/abundance.tsv
+  tsvkit info -H raw_no_header.tsv
+  zcat large.tsv.gz | tsvkit info -
+
+How to read output:
+  #shape(r, c)          -> number of data rows and final detected columns
+  type=num              -> all non-empty observed values looked numeric
+  type=date             -> all non-empty observed values matched YYYY-MM-DD
+  type=str              -> mixed/other values
+  firstN=[...]          -> first observed values in that column (for quick QA)
+
+Practical workflow:
+  Use `info` first, then feed column names into:
+    tsvkit cut -f ...
+    tsvkit filter -e ...
+    tsvkit summarize -s ..."
 )]
 pub struct InfoArgs {
     /// Input TSV file (use '-' for stdin; gz/xz supported)

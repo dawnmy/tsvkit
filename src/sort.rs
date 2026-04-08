@@ -14,7 +14,21 @@ use crate::common::{
 #[derive(Args, Debug)]
 #[command(
     about = "Sort TSV rows by column keys",
-    long_about = "Sort TSV rows by one or more keys. Provide -k/--key with column selectors (names or 1-based indices) and optional modifiers: :n (numeric asc), :nr (numeric desc), :r (reverse text). Repeat -k for additional sort levels. Defaults to header-aware mode; add -H for headerless files.\n\nExamples:\n  tsvkit sort -k count:nr examples/abundance.tsv\n  tsvkit sort -k $1:nr -k $2:r examples/profiles.tsv"
+    long_about = "Sort TSV rows by one or more keys. Provide -k/--key with column selectors (names or 1-based indices) and optional modifiers: :n (numeric asc), :nr (numeric desc), :r (reverse text). Repeat -k for additional sort levels. Defaults to header-aware mode; add -H for headerless files.\n\nExamples:\n  tsvkit sort -k count:nr examples/abundance.tsv\n  tsvkit sort -k $1:nr -k $2:r examples/profiles.tsv",
+    after_help = "Key spec quick reference:
+  -k col        text ascending
+  -k col:r      text descending
+  -k col:n      numeric ascending
+  -k col:nr     numeric descending
+
+Multi-key examples:
+  tsvkit sort -k group -k score:nr data.tsv
+  tsvkit sort -k date -k sample_id data.tsv
+  tsvkit sort -H -k 3:n -k 1 raw.tsv
+
+Tips:
+  Stable sort (default) preserves input order for equal keys.
+  Use --unstable for speed when equal-key order does not matter."
 )]
 pub struct SortArgs {
     /// Input TSV file (use '-' for stdin; gz/xz supported)

@@ -7,20 +7,37 @@ use clap::Args;
 use crate::common::{InputOptions, inconsistent_width_error, reader_for_path, should_skip_record};
 
 #[derive(Args, Debug)]
-#[command(about = "Transpose rows and columns")]
+#[command(
+    about = "Transpose rows and columns",
+    long_about = "Swap table axes so rows become columns and columns become rows. This is handy when samples are rows but downstream tooling expects samples as columns (or vice versa). By default, headers are included as the first row before transposition.",
+    after_help = "Examples:
+  tsvkit transpose examples/profiles.tsv
+  tsvkit transpose -H matrix_no_header.tsv
+  tsvkit cut -f 'sample1:sample3' examples/profiles.tsv | tsvkit transpose
+
+Behavior notes:
+  Header mode (default): header participates in transpose as row 1.
+  No-header mode (-H): all rows are treated as data only.
+  Ragged rows are rejected unless -I/--ignore-illegal-row is enabled."
+)]
 pub struct TransposeArgs {
+    /// Input TSV file (use '-' for stdin; gz/xz supported)
     #[arg(value_name = "FILE", default_value = "-")]
     pub file: PathBuf,
 
+    /// Treat input as headerless
     #[arg(short = 'H', long = "no-header")]
     pub no_header: bool,
 
+    /// Lines starting with this comment character are skipped
     #[arg(short = 'C', long = "comment-char", default_value = "#")]
     pub comment_char: String,
 
+    /// Ignore rows where every field is empty/whitespace
     #[arg(short = 'E', long = "ignore-empty-row")]
     pub ignore_empty_row: bool,
 
+    /// Ignore rows whose column count differs from the header/first row
     #[arg(short = 'I', long = "ignore-illegal-row")]
     pub ignore_illegal_row: bool,
 }
