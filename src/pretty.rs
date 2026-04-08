@@ -10,7 +10,7 @@ use crate::common::{InputOptions, inconsistent_width_error, reader_for_path, sho
 #[derive(Args, Debug)]
 #[command(
     about = "Render TSV data in a pretty table",
-    long_about = "Format TSV rows into an aligned, boxed table for quick inspection in the terminal. Reads from files or stdin and supports table width limits to avoid wrapping explosions on very wide datasets.",
+    long_about = "Format TSV rows into an aligned, boxed table for quick inspection in the terminal. Reads from files or stdin, including `.tsv`, `.tsv.gz`, and `.tsv.xz` inputs, and supports table width limits to avoid wrapping explosions on very wide datasets.",
     after_help = "Examples:
   tsvkit pretty examples/profiles.tsv
   tsvkit cut -f 'sample_id,group,purity' examples/samples.tsv | tsvkit pretty
@@ -22,7 +22,7 @@ Tips:
   Great for interactive exploration before exporting raw TSV downstream."
 )]
 pub struct PrettyArgs {
-    /// Input TSV file (use '-' for stdin)
+    /// Input TSV file (use '-' for stdin; `.tsv`, `.tsv.gz`, `.tsv.xz` supported)
     #[arg(value_name = "FILE", default_value = "-")]
     pub file: PathBuf,
 
