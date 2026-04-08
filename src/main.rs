@@ -10,6 +10,7 @@ mod cut;
 mod excel;
 mod expression;
 mod filter;
+mod head;
 mod info;
 mod join;
 mod melt;
@@ -19,6 +20,7 @@ mod pretty;
 mod slice;
 mod sort;
 mod summarize;
+mod transpose;
 
 #[derive(Parser)]
 #[command(
@@ -53,6 +55,10 @@ enum Commands {
     Sort(sort::SortArgs),
     /// Add derived columns or rewrite existing ones
     Mutate(mutate::MutateArgs),
+    /// Preview first rows in pretty format
+    Head(head::HeadArgs),
+    /// Transpose rows and columns
+    Transpose(transpose::TransposeArgs),
     /// Slice rows by 1-based index
     Slice(slice::SliceArgs),
     /// Excel-focused helpers (inspect, preview, convert, load)
@@ -76,6 +82,8 @@ fn main() -> Result<()> {
         Commands::Melt(args) => melt::run(args),
         Commands::Sort(args) => sort::run(args),
         Commands::Mutate(args) => mutate::run(args),
+        Commands::Head(args) => head::run(args),
+        Commands::Transpose(args) => transpose::run(args),
         Commands::Slice(args) => slice::run(args),
         Commands::Excel(args) => excel::run(args, &raw_args),
         Commands::Csv(args) => csv::run(args),

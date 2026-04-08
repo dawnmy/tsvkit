@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use csv::ReaderBuilder;
@@ -270,6 +270,225 @@ pub fn inconsistent_width_error(
 
 pub fn default_headers(len: usize) -> Vec<String> {
     (1..=len).map(|i| format!("col{}", i)).collect()
+}
+
+#[derive(Debug, Clone)]
+pub struct FileTemplateContext {
+    pub path: String,
+    pub base: String,
+    pub dir: String,
+}
+
+impl FileTemplateContext {
+    pub fn from_path(path: &Path) -> Self {
+        if path == Path::new("-") {
+            return FileTemplateContext {
+                path: "-".to_string(),
+                base: "-".to_string(),
+                dir: ".".to_string(),
+            };
+        }
+        let full = path.to_string_lossy().into_owned();
+        let base = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| full.clone());
+        let dir = path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ".".to_string());
+        FileTemplateContext {
+            path: full,
+            base,
+            dir,
+        }
+    }
+}
+
+pub fn render_file_template(template: &str, ctx: &FileTemplateContext) -> Result<String> {
+    let mut out = String::new();
+    let chars = template.chars().collect::<Vec<_>>();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '}' {
+                j += 1;
+            }
+            if j >= chars.len() {
+                bail!("unterminated '{{' in template '{}'", template);
+            }
+            let token = chars[i + 1..j].iter().collect::<String>();
+            out.push_str(&expand_file_token(token.trim(), ctx)?);
+            i = j + 1;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    Ok(out)
+}
+
+fn expand_file_token(token: &str, ctx: &FileTemplateContext) -> Result<String> {
+    let (core, case_mode) = if let Some((left, right)) = token.split_once('!') {
+        (left.trim(), Some(right.trim().to_ascii_lowercase()))
+    } else {
+        (token, None)
+    };
+
+    let (core, suffix) = if let Some((left, right)) = core.split_once('^') {
+        (left.trim(), Some(right.to_string()))
+    } else {
+        (core, None)
+    };
+
+    let (core, prefix) = if let Some((left, right)) = core.split_once('#') {
+        (left.trim(), Some(right.to_string()))
+    } else {
+        (core, None)
+    };
+
+    let mut value = match core {
+        "file" => ctx.path.clone(),
+        "base" => ctx.base.clone(),
+        "dir" => ctx.dir.clone(),
+        _ => {
+            let source;
+            let mut actions = String::new();
+            for ch in core.chars() {
+                if ch.is_ascii_alphabetic() {
+                    actions.push(ch);
+                    continue;
+                }
+            }
+            if core.starts_with("base") {
+                source = "base";
+                actions = core["base".len()..].to_string();
+            } else if core.starts_with("dir") {
+                source = "dir";
+                actions = core["dir".len()..].to_string();
+            } else if core.starts_with("file") {
+                source = "file";
+                actions = core["file".len()..].to_string();
+            } else {
+                bail!("unsupported template token '{}'", token);
+            }
+            apply_template_actions(source, &actions, ctx)?
+        }
+    };
+
+    if let Some(sfx) = suffix {
+        if value.ends_with(&sfx) {
+            let trimmed = value.len().saturating_sub(sfx.len());
+            value.truncate(trimmed);
+        }
+    }
+
+    if let Some(pfx) = prefix {
+        if value.starts_with(&pfx) {
+            value = value[pfx.len()..].to_string();
+        }
+    }
+
+    if let Some(mode) = case_mode {
+        value = match mode.as_str() {
+            "upper" | "u" => value.to_uppercase(),
+            "lower" | "l" => value.to_lowercase(),
+            "cap" | "capitalize" | "c" => capitalize_first(&value),
+            _ => bail!("unsupported case mode '{}'", mode),
+        };
+    }
+
+    Ok(value)
+}
+
+fn apply_template_actions(
+    source: &str,
+    actions: &str,
+    ctx: &FileTemplateContext,
+) -> Result<String> {
+    let mut value = match source {
+        "file" => ctx.path.clone(),
+        "base" => ctx.base.clone(),
+        "dir" => ctx.dir.clone(),
+        _ => bail!("unsupported template source '{}'", source),
+    };
+
+    for ch in actions.chars() {
+        match ch {
+            '%' => value = basename(&value),
+            '/' => value = basedir(&value),
+            ':' => value = strip_all_extensions(&value),
+            '.' => value = strip_last_extension(&value),
+            _ if ch.is_whitespace() => {}
+            _ => bail!("unsupported template modifier '{}' in '{}'", ch, actions),
+        }
+    }
+    Ok(value)
+}
+
+fn basename(input: &str) -> String {
+    Path::new(input)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| input.to_string())
+}
+
+fn basedir(input: &str) -> String {
+    PathBuf::from(input)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ".".to_string())
+}
+
+fn strip_last_extension(input: &str) -> String {
+    let path = Path::new(input);
+    if let Some(stem) = path.file_stem() {
+        if let Some(parent) = path.parent() {
+            if parent.as_os_str().is_empty() {
+                return stem.to_string_lossy().into_owned();
+            }
+            return format!("{}/{}", parent.to_string_lossy(), stem.to_string_lossy());
+        }
+        return stem.to_string_lossy().into_owned();
+    }
+    input.to_string()
+}
+
+fn strip_all_extensions(input: &str) -> String {
+    let path = Path::new(input);
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| input.to_string());
+    let mut core = name.clone();
+    while let Some((left, _)) = core.rsplit_once('.') {
+        if left.is_empty() {
+            break;
+        }
+        core = left.to_string();
+    }
+    if let Some(parent) = path.parent() {
+        if parent.as_os_str().is_empty() {
+            return core;
+        }
+        return format!("{}/{}", parent.to_string_lossy(), core);
+    }
+    core
+}
+
+fn capitalize_first(input: &str) -> String {
+    let mut chars = input.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => {
+            let mut out = first.to_uppercase().to_string();
+            out.push_str(chars.as_str());
+            out
+        }
+    }
 }
 
 fn parse_selector_token(token: SelectorToken) -> Result<ColumnSelector> {
@@ -727,9 +946,12 @@ fn resolve_selector_index(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
-        ColumnSelector, SpecialColumn, parse_selector_list, parse_single_selector,
-        resolve_selectors, resolve_selectors_allow_duplicates,
+        ColumnSelector, FileTemplateContext, SpecialColumn, parse_selector_list,
+        parse_single_selector, render_file_template, resolve_selectors,
+        resolve_selectors_allow_duplicates,
     };
 
     #[test]
@@ -837,6 +1059,34 @@ mod tests {
         let selectors = parse_selector_list("-1,-2").unwrap();
         let indices = resolve_selectors(&headers, &selectors, false).unwrap();
         assert_eq!(indices, vec![2, 1]);
+    }
+
+    #[test]
+    fn resolves_negative_open_range() {
+        let headers = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let selectors = parse_selector_list("-2:").unwrap();
+        let indices = resolve_selectors(&headers, &selectors, false).unwrap();
+        assert_eq!(indices, vec![2, 3]);
+    }
+
+    #[test]
+    fn renders_file_template_variants() {
+        let ctx = FileTemplateContext::from_path(Path::new("/tmp/a.b.c.tsv"));
+        assert_eq!(render_file_template("{base}", &ctx).unwrap(), "a.b.c.tsv");
+        assert_eq!(render_file_template("{base.}", &ctx).unwrap(), "a.b.c");
+        assert_eq!(render_file_template("{base:}", &ctx).unwrap(), "a");
+        assert_eq!(render_file_template("{file%:}", &ctx).unwrap(), "a");
+        let ctx2 = FileTemplateContext::from_path(Path::new("/tmp/sample_A.tsv"));
+        assert_eq!(render_file_template("{base:#sample_}", &ctx2).unwrap(), "A");
+        assert_eq!(
+            render_file_template("{file^.tsv}", &ctx).unwrap(),
+            "/tmp/a.b.c"
+        );
     }
 
     #[test]

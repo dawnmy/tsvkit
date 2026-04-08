@@ -24,7 +24,9 @@
   - [`melt`](#melt)
   - [`pivot`](#pivot)
   - [`slice`](#slice)
+  - [`head`](#head)
   - [`pretty`](#pretty)
+  - [`transpose`](#transpose)
   - [`excel`](#excel)
   - [`csv`](#csv)
 - [Additional tips](#additional-tips)
@@ -104,7 +106,9 @@ The list below provides a one-line description of every `tsvkit` subcommand. Eac
 - [`melt`](#melt) — convert wide tables into tidy long form with `variable/value` pairs.
 - [`pivot`](#pivot) — convert long form back to wide with optional fill value for missing cells.
 - [`slice`](#slice) — extract rows by 1-based indices or ranges.
+- [`head`](#head) — preview the first rows as a boxed table (single or multiple files).
 - [`pretty`](#pretty) — render aligned, boxed tables for quick inspection or sharing.
+- [`transpose`](#transpose) — transpose rows and columns.
 - [`excel`](#excel) — inspect, preview, export, or build `.xlsx` workbooks.
 - [`csv`](#csv) — convert delimited text to TSV with custom separators.
 
@@ -174,6 +178,9 @@ List literals use square brackets: `[1,2,3]`, `["case","control"]`, `[IL6:IL10]`
 | `log2(expr)` | Base-2 logarithm |
 | `len(expr)` | Character count using Unicode code points. |
 | `is_na(expr)` | Returns `1` when the expression is blank/`NA`/`NaN`, otherwise `0`. |
+| `upper(expr)` | Convert text to uppercase. |
+| `lower(expr)` | Convert text to lowercase. |
+| `cap(expr)` | Capitalize only the first character. |
 
 Functions accept column references (`abs($purity - 1)`), constants, or subexpressions. Empty or non-numeric values yield blanks.
 
@@ -259,6 +266,29 @@ tsvkit cut --fc sample -f '__base__,1:' examples/qc*.tsv
 ```
 The column name will be "sample" not "__base__" in the output.
 
+`--file-col` now also accepts file-template expressions so injected values can be derived from paths:
+
+```bash
+tsvkit cut --file-col '{base:}' -f '__file__,1:2' examples/qc.tsv
+```
+
+Template tokens:
+
+- `{file}` full path, `{base}` basename, `{dir}` parent dir
+- `{base:}` basename without all extensions
+- `{base.}` basename without last extension
+- `{file%}` basename of `{file}`
+- `{file/}` directory of `{file}`
+- `{file^suffix}` remove a literal trailing suffix when present
+- `{base:#prefix}` remove a literal prefix when present (example: `{base:#sample_}`)
+- case controls: append `!upper`, `!lower`, or `!cap` (for example `{base:!upper}`)
+
+Negative selectors in `cut -f`:
+
+- `-1` = last column
+- `-2` = second-last column
+- `-2:` = from second-last to the final column
+
 
 Matches deduplicate by default; add `-D/--allow-dups` to keep every occurrence when multiple selectors target the same column.
 
@@ -271,6 +301,13 @@ tsvkit filter -e '$group == "case" & $purity >= 0.94' examples/samples.tsv
 
 ```bash
 tsvkit filter -e '$status !in ["fail","missing","error"] & $tech ~ "sRNA"' examples/samples.tsv
+```
+
+Case helpers are supported in filter expressions:
+
+```bash
+tsvkit filter -e 'cap($1) == "HELLO"' data.tsv
+tsvkit filter -e 'upper($group) == "CASE"' examples/samples.tsv
 ```
 
 **Expression building blocks for `filter`**
@@ -306,6 +343,31 @@ tsvkit join -f subject_id examples/samples.tsv examples/subjects.tsv
 
 Control join type with `-k` (`-k 0` = full outer). Use `-F/--select` to specify output columns (defaults to all non-key columns); syntax mirrors `-f`. `--fill TEXT` supplies placeholders for missing combinations, while `--sorted` streams pre-sorted data. `tsvkit join` trims unused columns before indexing, and `-t/--threads` (default up to 8) balances throughput and resource usage.
 
+Use `--add-header` to override emitted non-key header names with per-file/per-column templates:
+
+```bash
+tsvkit join \
+  -f 'subject_id;subject_id' \
+  -F 'group,purity;sex,age' \
+  --add-header '{base:}_group,{base:}_purity;{base:}_sex,{base:}_age' \
+  examples/samples.tsv examples/subjects.tsv
+```
+
+Formatting rules: split files with `;`, columns with `,`, and keep counts aligned with `-F` for each file. Template tokens are shared with `cut --file-col`.
+
+When using `-H` (no input header) together with `--add-header`, `join` now emits a header row:
+- join-key columns are named `index1`, `index2`, ..., `indexN`
+- non-key columns use your `--add-header` templates.
+
+Example:
+
+```bash
+tsvkit join -H \
+  -f '1;1' \
+  --add-header 'patient_{base:#sample_}' \
+  sample_A.tsv sample_B.tsv
+```
+
 ### `mutate`
 Create derived columns or rewrite values using expressions.
 
@@ -336,6 +398,25 @@ Apply in-place edits with the sed-style form:
 tsvkit mutate -e 's/$group/ctrl/control/' examples/samples.tsv
 ```
 
+Multiple expressions can be packed into one `-e` clause using `;`:
+
+```bash
+tsvkit mutate -e 'v1=$7/$8;v2=$11/$12' data.tsv
+```
+
+Create new columns from regex replacement with:
+
+```bash
+tsvkit mutate -e 'new=s/$2/aa[0-9]+/bb/' data.tsv
+tsvkit mutate -e 'new2=${1/aa/bb}' data.tsv
+```
+
+String case helpers can be used directly in mutate expressions:
+
+```bash
+tsvkit mutate -e 'v1=cap($2)' -e 'v2=upper($group)' data.tsv
+```
+
 **Mutation building blocks**
 
 | Form | Meaning | Example |
@@ -343,6 +424,8 @@ tsvkit mutate -e 's/$group/ctrl/control/' examples/samples.tsv
 | `name=EXPR` | Append a new column containing the evaluated expression. | `mean_signal=mean($sig1:$sig4)` |
 | `existing=EXPR` | Overwrite an existing column with the expression result. | `purity=round($purity,2)` (via custom helper script) |
 | `s/$selectors/pattern/replacement/` | Regex substitution on one or more columns (`$` optional). | `s/$group/ctrl/control/` |
+| `new=s/$selector/pattern/replacement/` | Create a new column from one source column via regex replacement. | `new=s/$2/aa/bb/` |
+| `new=${selector/pattern/replacement}` | Braced shorthand for assignment substitution. | `new=${1/aa/bb}` |
 
 **Row-wise aggregators shared by `filter` and `mutate`**
 
@@ -445,6 +528,13 @@ Take specific rows (1-based indices or ranges, including open-ended forms like `
 tsvkit slice -r 1,4:5 examples/samples.tsv
 ```
 
+### `head`
+Pretty-print the first rows of one or multiple TSV files. Default is `-n 10`; each input block starts with `# <file>`.
+
+```bash
+tsvkit head -n 5 examples/samples.tsv examples/subjects.tsv
+```
+
 ### `pretty`
 Render aligned, boxed output for quick inspection.
 
@@ -454,6 +544,13 @@ tsvkit filter -e '$group == "case"' examples/samples.tsv | tsvkit pretty
 
 - `--round DIGITS` (or `-r`) rounds numeric cells to the requested precision. Tiny magnitudes automatically switch to scientific
   notation so columns stay legible even when values approach zero.
+
+### `transpose`
+Transpose a table (rows become columns). With headers, the header row is included in transposition; use `-H` for headerless input.
+
+```bash
+tsvkit transpose examples/samples.tsv
+```
 
 ### `excel`
 Inspect `.xlsx` workbooks, preview sheets, export ranges as TSV, or assemble new workbooks from TSV inputs. Unless `-H/--no-header` is supplied, the first row of each sheet is treated as the header row; use that flag when you need to preview or export raw rows.

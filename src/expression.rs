@@ -69,6 +69,9 @@ pub enum FunctionName {
     Log2,
     Len,
     IsNa,
+    Upper,
+    Lower,
+    Cap,
 }
 
 impl FunctionName {
@@ -83,8 +86,11 @@ impl FunctionName {
             "log2" => Ok(FunctionName::Log2),
             "len" => Ok(FunctionName::Len),
             "is_na" => Ok(FunctionName::IsNa),
+            "upper" => Ok(FunctionName::Upper),
+            "lower" => Ok(FunctionName::Lower),
+            "cap" => Ok(FunctionName::Cap),
             other => bail!(
-                "unsupported function '{}': try abs, sqrt, exp, exp2, ln, log, log10, log2, len, is_na",
+                "unsupported function '{}': try abs, sqrt, exp, exp2, ln, log, log10, log2, len, is_na, upper, lower, cap",
                 other
             ),
         }
@@ -496,6 +502,29 @@ where
                         || text.eq_ignore_ascii_case("na")
                         || text.eq_ignore_ascii_case("nan");
                     bool_eval(is_na)
+                }
+                FunctionName::Upper => EvalValue {
+                    text: Cow::Owned(inner_eval.text.to_uppercase()),
+                    numeric: None,
+                },
+                FunctionName::Lower => EvalValue {
+                    text: Cow::Owned(inner_eval.text.to_lowercase()),
+                    numeric: None,
+                },
+                FunctionName::Cap => {
+                    let mut chars = inner_eval.text.chars();
+                    let text = match chars.next() {
+                        None => String::new(),
+                        Some(first) => {
+                            let mut out = first.to_uppercase().to_string();
+                            out.push_str(chars.as_str());
+                            out
+                        }
+                    };
+                    EvalValue {
+                        text: Cow::Owned(text),
+                        numeric: None,
+                    }
                 }
             }
         }
@@ -1218,6 +1247,39 @@ mod tests {
         let row = vec!["hello".to_string()];
         let result = eval_value(&bound, &row);
         assert_eq!(result.numeric, Some(5.0));
+    }
+
+    #[test]
+    fn string_case_functions_transform_text() {
+        let headers = vec!["text".to_string()];
+        let upper = bind_value_expression(
+            parse_value_expression("upper($1)").unwrap(),
+            &headers,
+            false,
+        )
+        .unwrap();
+        let lower = bind_value_expression(
+            parse_value_expression("lower($1)").unwrap(),
+            &headers,
+            false,
+        )
+        .unwrap();
+        let cap =
+            bind_value_expression(parse_value_expression("cap($1)").unwrap(), &headers, false)
+                .unwrap();
+        let row = vec!["hELLo".to_string()];
+        assert_eq!(eval_value(&upper, &row).text.as_ref(), "HELLO");
+        assert_eq!(eval_value(&lower, &row).text.as_ref(), "hello");
+        assert_eq!(eval_value(&cap, &row).text.as_ref(), "HELLo");
+    }
+
+    #[test]
+    fn cap_function_works_in_filter_comparisons() {
+        let expr = parse_expression("cap($1) == \"HELLO\"").unwrap();
+        let headers = vec!["greet".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = csv::StringRecord::from(vec!["hELLO"]);
+        assert!(evaluate(&bound, &row));
     }
 
     #[test]

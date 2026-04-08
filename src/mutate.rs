@@ -194,7 +194,7 @@ fn parse_operations(
 ) -> Result<Vec<MutateOp>> {
     let mut ops = Vec::new();
     let mut current_headers = headers.to_vec();
-    for expr in exprs {
+    for expr in flatten_expr_clauses(exprs)? {
         let trimmed = expr.trim();
         if trimmed.is_empty() {
             bail!("mutation expression must not be empty");
@@ -310,6 +310,25 @@ fn find_assignment(expr: &str) -> Option<usize> {
 fn parse_function(value: &str, headers: &[String], no_header: bool) -> Result<FunctionSpec> {
     let trimmed = value.trim();
 
+    if trimmed.starts_with("s/") {
+        let sub = parse_substitution_spec(trimmed, headers, no_header)?;
+        return Ok(FunctionSpec::SubNew {
+            column: sub.column,
+            pattern: sub.pattern,
+            replacement: sub.replacement,
+        });
+    }
+
+    if trimmed.starts_with("${") && trimmed.ends_with('}') {
+        let inner = &trimmed[2..trimmed.len() - 1];
+        let sub = parse_braced_substitution_spec(inner, headers, no_header)?;
+        return Ok(FunctionSpec::SubNew {
+            column: sub.column,
+            pattern: sub.pattern,
+            replacement: sub.replacement,
+        });
+    }
+
     if let Some(rest) = trimmed.strip_prefix("sub(") {
         let inner = rest
             .strip_suffix(')')
@@ -385,6 +404,61 @@ fn parse_substitution_expression(
     let regex = Regex::new(&regex_pattern).with_context(|| "invalid regex in substitution")?;
     Ok(MutateOp::Substitute {
         columns: indices,
+        pattern: regex,
+        replacement: unescape_substitution_component(replacement_part),
+    })
+}
+
+struct SubstitutionSpec {
+    column: usize,
+    pattern: Regex,
+    replacement: String,
+}
+
+fn parse_substitution_spec(
+    expr: &str,
+    headers: &[String],
+    no_header: bool,
+) -> Result<SubstitutionSpec> {
+    let content = expr.trim_start_matches("s/");
+    let content = content
+        .strip_suffix('/')
+        .with_context(|| "substitution expression must end with '/'")?;
+    let (selector_part, pattern_part, replacement_part) = split_substitution_components(content)
+        .with_context(
+            || "substitution expression must use s/selectors/pattern/replacement/ syntax",
+        )?;
+    let selectors = parse_selector_list(&normalize_selector_spec(selector_part.trim()))?;
+    if selectors.len() != 1 {
+        bail!("assignment substitution requires exactly one target column");
+    }
+    let indices = resolve_selectors(headers, &selectors, no_header)?;
+    let regex_pattern = unescape_substitution_component(pattern_part);
+    let regex = Regex::new(&regex_pattern).with_context(|| "invalid regex in substitution")?;
+    Ok(SubstitutionSpec {
+        column: indices[0],
+        pattern: regex,
+        replacement: unescape_substitution_component(replacement_part),
+    })
+}
+
+fn parse_braced_substitution_spec(
+    expr: &str,
+    headers: &[String],
+    no_header: bool,
+) -> Result<SubstitutionSpec> {
+    let (selector_part, pattern_part, replacement_part) = split_substitution_components(expr)
+        .with_context(|| "braced substitution must use ${selector/pattern/replacement} syntax")?;
+    let selector_text = selector_part.trim().trim_start_matches('$');
+    let selectors = parse_selector_list(selector_text)?;
+    if selectors.len() != 1 {
+        bail!("braced substitution requires exactly one target column");
+    }
+    let indices = resolve_selectors(headers, &selectors, no_header)?;
+    let regex = Regex::new(&unescape_substitution_component(pattern_part))
+        .with_context(|| "invalid regex in braced substitution")?;
+    Ok(SubstitutionSpec {
+        column: indices[0],
         pattern: regex,
         replacement: unescape_substitution_component(replacement_part),
     })
@@ -471,6 +545,44 @@ fn split_args(input: &str) -> Vec<String> {
         args.push(current.trim().to_string());
     }
     args
+}
+
+fn flatten_expr_clauses(exprs: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for expr in exprs {
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+        let mut current = String::new();
+        for ch in expr.chars() {
+            match ch {
+                '\\' if !escaped => {
+                    escaped = true;
+                    current.push(ch);
+                    continue;
+                }
+                '\'' if !escaped && !in_double => in_single = !in_single,
+                '"' if !escaped && !in_single => in_double = !in_double,
+                ';' if !in_single && !in_double => {
+                    if !current.trim().is_empty() {
+                        out.push(current.trim().to_string());
+                    }
+                    current.clear();
+                    continue;
+                }
+                _ => {}
+            }
+            escaped = false;
+            current.push(ch);
+        }
+        if in_single || in_double {
+            bail!("unterminated quote in -e expression '{}'", expr);
+        }
+        if !current.trim().is_empty() {
+            out.push(current.trim().to_string());
+        }
+    }
+    Ok(out)
 }
 
 fn parse_string_literal(value: &str) -> Result<String> {
@@ -678,5 +790,33 @@ mod tests {
     fn parse_string_literal_handles_common_escapes() {
         let literal = parse_string_literal("\"line\\nfeed\\tend\"").unwrap();
         assert_eq!(literal, "line\nfeed\tend");
+    }
+
+    #[test]
+    fn supports_multiple_assignments_in_single_e_clause() {
+        let headers = vec!["x".to_string(), "y".to_string()];
+        let ops = parse_operations(&["v1=$x;v2=$y".to_string()], &headers, false).unwrap();
+        let mut row = vec!["6".to_string(), "3".to_string()];
+        process_row(&mut row, &ops).unwrap();
+        assert_eq!(row[2], "6");
+        assert_eq!(row[3], "3");
+    }
+
+    #[test]
+    fn assignment_substitution_supports_s_syntax_and_braced_syntax() {
+        let headers = vec!["c1".to_string()];
+        let ops = parse_operations(
+            &[
+                "new=s/$c1/aa[0-9]+/bb/".to_string(),
+                "new2=${1/aa/bb}".to_string(),
+            ],
+            &headers,
+            false,
+        )
+        .unwrap();
+        let mut row = vec!["aa12".to_string()];
+        process_row(&mut row, &ops).unwrap();
+        assert_eq!(row[1], "bb");
+        assert_eq!(row[2], "bb12");
     }
 }
