@@ -280,6 +280,7 @@ Template tokens:
 - `{file%}` basename of `{file}`
 - `{file/}` directory of `{file}`
 - `{file^suffix}` remove a literal trailing suffix when present
+- `{base:#prefix}` remove a literal prefix when present (example: `{base:#sample_}`)
 - case controls: append `!upper`, `!lower`, or `!cap` (for example `{base:!upper}`)
 
 Negative selectors in `cut -f`:
@@ -353,6 +354,19 @@ tsvkit join \
 ```
 
 Formatting rules: split files with `;`, columns with `,`, and keep counts aligned with `-F` for each file. Template tokens are shared with `cut --file-col`.
+
+When using `-H` (no input header) together with `--add-header`, `join` now emits a header row:
+- join-key columns are named `index1`, `index2`, ..., `indexN`
+- non-key columns use your `--add-header` templates.
+
+Example:
+
+```bash
+tsvkit join -H \
+  -f '1;1' \
+  --add-header 'patient_{base:#sample_}' \
+  sample_A.tsv sample_B.tsv
+```
 
 ### `mutate`
 Create derived columns or rewrite values using expressions.

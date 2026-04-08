@@ -343,6 +343,12 @@ fn expand_file_token(token: &str, ctx: &FileTemplateContext) -> Result<String> {
         (core, None)
     };
 
+    let (core, prefix) = if let Some((left, right)) = core.split_once('#') {
+        (left.trim(), Some(right.to_string()))
+    } else {
+        (core, None)
+    };
+
     let mut value = match core {
         "file" => ctx.path.clone(),
         "base" => ctx.base.clone(),
@@ -376,6 +382,12 @@ fn expand_file_token(token: &str, ctx: &FileTemplateContext) -> Result<String> {
         if value.ends_with(&sfx) {
             let trimmed = value.len().saturating_sub(sfx.len());
             value.truncate(trimmed);
+        }
+    }
+
+    if let Some(pfx) = prefix {
+        if value.starts_with(&pfx) {
+            value = value[pfx.len()..].to_string();
         }
     }
 
@@ -1069,6 +1081,8 @@ mod tests {
         assert_eq!(render_file_template("{base.}", &ctx).unwrap(), "a.b.c");
         assert_eq!(render_file_template("{base:}", &ctx).unwrap(), "a");
         assert_eq!(render_file_template("{file%:}", &ctx).unwrap(), "a");
+        let ctx2 = FileTemplateContext::from_path(Path::new("/tmp/sample_A.tsv"));
+        assert_eq!(render_file_template("{base:#sample_}", &ctx2).unwrap(), "A");
         assert_eq!(
             render_file_template("{file^.tsv}", &ctx).unwrap(),
             "/tmp/a.b.c"

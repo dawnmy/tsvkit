@@ -316,7 +316,7 @@ fn execute_join(args: &JoinArgs, input_opts: &InputOptions, fill_value: &str) ->
             &select_specs,
             &keep,
             args.no_header,
-            !args.no_header,
+            !args.no_header || args.add_header.is_some(),
             input_opts,
             fill_value,
             args.add_header.as_deref(),
@@ -352,7 +352,8 @@ fn execute_join(args: &JoinArgs, input_opts: &InputOptions, fill_value: &str) ->
     output_joined(
         tables,
         &keep,
-        !args.no_header,
+        !args.no_header || args.add_header.is_some(),
+        args.no_header,
         &args.files,
         args.add_header.as_deref(),
     )
@@ -709,14 +710,16 @@ fn parse_keep_option(spec: Option<&str>, file_count: usize) -> Result<KeepStrate
 fn output_joined(
     tables: Vec<Table>,
     keep: &KeepStrategy,
-    has_header: bool,
+    emit_header: bool,
+    no_header: bool,
     files: &[PathBuf],
     add_header_spec: Option<&str>,
 ) -> Result<()> {
     let mut writer = BufWriter::new(io::stdout().lock());
 
-    if has_header {
-        let header_fields = build_join_headers(tables.as_slice(), files, add_header_spec)?;
+    if emit_header {
+        let header_fields =
+            build_join_headers(tables.as_slice(), files, add_header_spec, no_header)?;
         if !header_fields.is_empty() {
             writeln!(writer, "{}", header_fields.join("	"))?;
         }
@@ -812,7 +815,7 @@ fn stream_join(
     select_specs: &[Option<Vec<ColumnSelector>>],
     keep: &KeepStrategy,
     no_header: bool,
-    has_header: bool,
+    emit_header: bool,
     input_opts: &InputOptions,
     fill_value: &str,
     add_header_spec: Option<&str>,
@@ -842,8 +845,8 @@ fn stream_join(
 
     let mut writer = BufWriter::new(io::stdout().lock());
 
-    if has_header {
-        write_stream_header(&tables, files, add_header_spec, &mut writer)?;
+    if emit_header {
+        write_stream_header(&tables, files, add_header_spec, no_header, &mut writer)?;
     }
 
     loop {
@@ -922,9 +925,10 @@ fn write_stream_header(
     tables: &[StreamTable],
     files: &[PathBuf],
     add_header_spec: Option<&str>,
+    no_header: bool,
     writer: &mut BufWriter<io::StdoutLock<'_>>,
 ) -> Result<()> {
-    let header_fields = build_join_headers_for_stream(tables, files, add_header_spec)?;
+    let header_fields = build_join_headers_for_stream(tables, files, add_header_spec, no_header)?;
     if !header_fields.is_empty() {
         writeln!(writer, "{}", header_fields.join("\t"))?;
     }
@@ -935,13 +939,18 @@ fn build_join_headers_for_stream(
     tables: &[StreamTable],
     files: &[PathBuf],
     add_header_spec: Option<&str>,
+    no_header: bool,
 ) -> Result<Vec<String>> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut header_fields = Vec::new();
 
     if let Some(first_table) = tables.first() {
-        for &idx in &first_table.join_indices {
-            let original = first_table.headers.get(idx).cloned().unwrap_or_default();
+        for (pos, &idx) in first_table.join_indices.iter().enumerate() {
+            let original = if no_header {
+                format!("index{}", pos + 1)
+            } else {
+                first_table.headers.get(idx).cloned().unwrap_or_default()
+            };
             let entry = seen.entry(original.clone()).or_insert(0);
             if *entry == 0 {
                 *entry = 1;
@@ -984,13 +993,18 @@ fn build_join_headers(
     tables: &[Table],
     files: &[PathBuf],
     add_header_spec: Option<&str>,
+    no_header: bool,
 ) -> Result<Vec<String>> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut header_fields = Vec::new();
 
     if let Some(first_table) = tables.first() {
-        for &idx in &first_table.join_indices {
-            let original = first_table.headers.get(idx).cloned().unwrap_or_default();
+        for (pos, &idx) in first_table.join_indices.iter().enumerate() {
+            let original = if no_header {
+                format!("index{}", pos + 1)
+            } else {
+                first_table.headers.get(idx).cloned().unwrap_or_default()
+            };
             let entry = seen.entry(original.clone()).or_insert(0);
             if *entry == 0 {
                 *entry = 1;
@@ -1166,5 +1180,46 @@ fn write_combinations(
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_header_with_no_header_uses_index_prefix_for_join_keys() {
+        let table1 = Table {
+            headers: vec!["col1".to_string(), "col2".to_string()],
+            join_indices: vec![0],
+            include_indices: vec![1],
+            rows: Vec::new(),
+            key_to_rows: HashMap::new(),
+            key_order: Vec::new(),
+            empty_row: vec![],
+        };
+        let table2 = Table {
+            headers: vec!["col1".to_string(), "col2".to_string()],
+            join_indices: vec![0],
+            include_indices: vec![1],
+            rows: Vec::new(),
+            key_to_rows: HashMap::new(),
+            key_order: Vec::new(),
+            empty_row: vec![],
+        };
+        let files = vec![
+            PathBuf::from("/tmp/sample_A.tsv"),
+            PathBuf::from("/tmp/sample_B.tsv"),
+        ];
+        let headers = build_join_headers(
+            &[table1, table2],
+            &files,
+            Some("patient_{base:#sample_};patient_{base:#sample_}"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(headers[0], "index1");
+        assert_eq!(headers[1], "patient_A");
+        assert_eq!(headers[2], "patient_B");
     }
 }
