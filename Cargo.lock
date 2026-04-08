@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "tsvkit"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "calamine",
