@@ -6,21 +6,57 @@ use clap::Args;
 
 use crate::common::{
     ColumnSelector, FileTemplateContext, InputOptions, SpecialColumn, default_headers,
-    parse_selector_list, reader_for_path, render_file_template, resolve_selectors,
+    parse_selector_list_with_templates, reader_for_path, render_file_template, resolve_selectors,
     resolve_selectors_allow_duplicates, should_skip_record,
 };
 
 #[derive(Args, Debug)]
 #[command(
     about = "Select and reorder TSV columns",
-    long_about = "Pick columns by name or 1-based index. Combine comma-separated selectors with ranges (colA:colD or 2:6) and single fields in one spec. Use ~\"regex\" to match columns by pattern. Defaults to header-aware mode; add -H for headerless input.\n\nExamples:\n  tsvkit cut -f id,sample3,sample1 examples/profiles.tsv\n  tsvkit cut -f 'Purity,sample:FN,F1' examples/profiles.tsv\n  tsvkit cut -H -f 3,1 data.tsv"
+    after_help = "Selector syntax:
+  name,index,range,regex mix:  id,2,group:tech,~\"^IL\"
+  negative indices/ranges:     -1,-2:     (last column, second-last to end)
+  literal symbol names:        `2:4`      (avoid selector parsing)
+
+Injected selectors:
+  __file__   inject file path per row
+  __base__   inject file basename per row
+  {file}     inject rendered template value (also {base}, {dir}, modifiers)
+  sample={base:!lower}   inline header+template alias
+
+Injected header names:
+  --inject-col-names sample,file_base
+  (aliases: --file-col, --fc)
+
+Template tokens:
+  {file} {base} {dir}
+  aliases: __file__ == file, __base__ == base, __dir__ == dir
+  modifiers: : (strip all ext), . (strip last ext), % (basename), / (dirname)
+  trims: ^suffix (remove trailing suffix), #prefix (remove leading prefix)
+  case: !lower !upper !cap
+
+Shell quoting note:
+  Use single quotes when templates contain '!': '{base:!lower}'
+  In double quotes, escape '!': \"{base:\\!lower}\"
+
+Examples:
+  tsvkit cut -f 'sample_id,group,purity' examples/samples.tsv
+  tsvkit cut -f '1,group,~\"^IL\",-1' examples/cytokines.tsv
+  tsvkit cut -f '{file},{base:},1:2' examples/qc.tsv
+  tsvkit cut -f 'sample={base:#sample_!lower},1:' sample_A.tsv
+  tsvkit cut -f '__base__,1:' examples/qc*.tsv
+  tsvkit cut --inject-col-names sample -f '__base__,1:' examples/qc*.tsv
+  tsvkit cut --inject-col-names file_name,sample -f '{base:},sample={base:#sample_!upper},1:2' sample_A.tsv
+  tsvkit cut -H -f '3,1,-1' data.tsv
+  tsvkit cut -C ';' -E -I -f '1:3' dirty.tsv
+  tsvkit cut -D -f 'value,~\"^value$\"' duplicated_headers.tsv"
 )]
 pub struct CutArgs {
     /// Input TSV file(s) (use '-' for stdin; supports gz/xz)
     #[arg(value_name = "FILES", num_args = 0.., default_values = ["-"])]
     pub files: Vec<PathBuf>,
 
-    /// Fields to select, using names, 1-based indices, ranges (`colA:colD`, `2:5`), regex (`~"^sample"`), or mixes. Comma-separated list.
+    /// Fields to select, using names, 1-based indices, ranges (`colA:colD`, `2:5`), regex (`~"^sample"`), templates (`{base:}`), or mixes. Comma-separated list.
     #[arg(
         short = 'f',
         long = "fields",
@@ -30,9 +66,13 @@ pub struct CutArgs {
     )]
     pub fields: String,
 
-    /// Rename the injected file column when using `__file__` or `__base__`
-    #[arg(long = "file-col", visible_alias = "fc", value_name = "NAME")]
-    pub file_col: Option<String>,
+    /// Comma-separated header names for injected columns (template/special selectors in -f)
+    #[arg(
+        long = "inject-col-names",
+        visible_aliases = ["file-col", "fc"],
+        value_name = "NAMES"
+    )]
+    pub inject_col_names: Option<String>,
 
     /// Treat the input as headerless (columns referenced by 1-based indices)
     #[arg(short = 'H', long = "no-header")]
@@ -61,7 +101,7 @@ pub struct CutArgs {
 }
 
 pub fn run(args: CutArgs) -> Result<()> {
-    let selectors = parse_selector_list(&args.fields)?;
+    let selectors = parse_selector_list_with_templates(&args.fields)?;
     let input_opts = InputOptions::from_flags(
         &args.comment_char,
         args.ignore_empty_row,
@@ -69,12 +109,12 @@ pub fn run(args: CutArgs) -> Result<()> {
     )?;
     let mut writer = BufWriter::new(io::stdout().lock());
 
-    let file_column_config = FileColumnConfig::new(args.file_col.as_deref());
+    let file_column_config = FileColumnConfig::parse(args.inject_col_names.as_deref())?;
     let mut header_emitted = false;
 
     for path in &args.files {
         let mut reader = reader_for_path(path, args.no_header, &input_opts)?;
-        let file_info = FileInfo::from_path(path).with_template(args.file_col.as_deref());
+        let file_info = FileInfo::from_path(path);
 
         if args.no_header {
             process_no_header_file(
@@ -162,6 +202,8 @@ fn process_header_file(
     let expected_width = headers.len();
 
     if !*header_emitted {
+        file_column_config.validate_count(&columns)?;
+        let mut injected_idx = 0usize;
         let header_fields: Vec<String> = columns
             .iter()
             .map(|column| match column {
@@ -170,7 +212,20 @@ fn process_header_file(
                     .map(|s| s.as_str())
                     .unwrap_or("")
                     .to_string(),
-                CutColumn::Injected(special) => file_column_config.header_for(*special),
+                CutColumn::Injected(special) => {
+                    let name = file_column_config
+                        .header_for(injected_idx)
+                        .unwrap_or_else(|| special.default_header().to_string());
+                    injected_idx += 1;
+                    name
+                }
+                CutColumn::Template { header, .. } => {
+                    let name = file_column_config
+                        .header_for(injected_idx)
+                        .unwrap_or_else(|| header.clone());
+                    injected_idx += 1;
+                    name
+                }
             })
             .collect();
         if !header_fields.is_empty() {
@@ -200,6 +255,9 @@ fn emit_record(
         match column {
             CutColumn::Index(idx) => fields.push(record.get(*idx).unwrap_or("").to_string()),
             CutColumn::Injected(special) => fields.push(file_info.rendered_value_for(*special)?),
+            CutColumn::Template { template, .. } => {
+                fields.push(render_file_template(template, &file_info.context)?)
+            }
         }
     }
     writeln!(writer, "{}", fields.join("\t"))?;
@@ -216,15 +274,26 @@ fn build_cut_columns(
     for selector in selectors {
         match selector {
             ColumnSelector::Special(special) => columns.push(CutColumn::Injected(*special)),
+            ColumnSelector::Template(template) => {
+                let raw = format!("{{{}}}", template);
+                columns.push(CutColumn::Template {
+                    header: raw.clone(),
+                    template: raw,
+                });
+            }
             ColumnSelector::Range(start, end) => {
-                if start
-                    .as_deref()
-                    .map_or(false, |sel| matches!(sel, ColumnSelector::Special(_)))
-                    || end
-                        .as_deref()
-                        .map_or(false, |sel| matches!(sel, ColumnSelector::Special(_)))
-                {
-                    bail!("special columns cannot be used within a range selector");
+                if start.as_deref().map_or(false, |sel| {
+                    matches!(
+                        sel,
+                        ColumnSelector::Special(_) | ColumnSelector::Template(_)
+                    )
+                }) || end.as_deref().map_or(false, |sel| {
+                    matches!(
+                        sel,
+                        ColumnSelector::Special(_) | ColumnSelector::Template(_)
+                    )
+                }) {
+                    bail!("special/template columns cannot be used within a range selector");
                 }
                 let indices = if allow_duplicates {
                     resolve_selectors_allow_duplicates(headers, &[selector.clone()], no_header)?
@@ -234,6 +303,12 @@ fn build_cut_columns(
                 columns.extend(indices.into_iter().map(CutColumn::Index));
             }
             _ => {
+                if let ColumnSelector::Name(name) = selector {
+                    if let Some((header, template)) = parse_inline_template_selector(name) {
+                        columns.push(CutColumn::Template { header, template });
+                        continue;
+                    }
+                }
                 let indices = if allow_duplicates {
                     resolve_selectors_allow_duplicates(headers, &[selector.clone()], no_header)?
                 } else {
@@ -249,26 +324,16 @@ fn build_cut_columns(
 #[derive(Clone)]
 struct FileInfo {
     context: FileTemplateContext,
-    template: Option<String>,
 }
 
 impl FileInfo {
     fn from_path(path: &Path) -> Self {
         FileInfo {
             context: FileTemplateContext::from_path(path),
-            template: None,
         }
-    }
-
-    fn with_template(mut self, template: Option<&str>) -> Self {
-        self.template = template.map(|s| s.to_string());
-        self
     }
 
     fn rendered_value_for(&self, special: SpecialColumn) -> Result<String> {
-        if let Some(template) = &self.template {
-            return render_file_template(template, &self.context);
-        }
         Ok(match special {
             SpecialColumn::FilePath => self.context.path.clone(),
             SpecialColumn::FileBase => self.context.base.clone(),
@@ -277,23 +342,90 @@ impl FileInfo {
 }
 
 struct FileColumnConfig<'a> {
-    rename: Option<&'a str>,
+    names: Vec<&'a str>,
 }
 
 impl<'a> FileColumnConfig<'a> {
-    fn new(rename: Option<&'a str>) -> Self {
-        FileColumnConfig { rename }
+    fn parse(spec: Option<&'a str>) -> Result<Self> {
+        let names = spec
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(FileColumnConfig { names })
     }
 
-    fn header_for(&self, special: SpecialColumn) -> String {
-        match self.rename {
-            Some(name) => name.to_string(),
-            None => special.default_header().to_string(),
+    fn header_for(&self, injected_idx: usize) -> Option<String> {
+        self.names.get(injected_idx).map(|s| s.to_string())
+    }
+
+    fn validate_count(&self, columns: &[CutColumn]) -> Result<()> {
+        let injected_count = columns.iter().filter(|c| c.is_injected()).count();
+        if self.names.len() > injected_count {
+            bail!(
+                "--inject-col-names provided {} name(s), but only {} injected column(s) are selected",
+                self.names.len(),
+                injected_count
+            );
         }
+        Ok(())
     }
 }
 
 enum CutColumn {
     Index(usize),
     Injected(SpecialColumn),
+    Template { header: String, template: String },
+}
+
+impl CutColumn {
+    fn is_injected(&self) -> bool {
+        matches!(self, CutColumn::Injected(_) | CutColumn::Template { .. })
+    }
+}
+
+fn parse_inline_template_selector(token: &str) -> Option<(String, String)> {
+    let (header, template) = token.split_once('=')?;
+    let header = header.trim();
+    let template = template.trim();
+    if header.is_empty()
+        || template.len() < 2
+        || !template.starts_with('{')
+        || !template.ends_with('}')
+    {
+        return None;
+    }
+    Some((header.to_string(), template.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::common::SpecialColumn;
+
+    use super::{CutColumn, FileColumnConfig, parse_inline_template_selector};
+
+    #[test]
+    fn parses_inline_template_selector() {
+        let parsed = parse_inline_template_selector("sample={base:!lower}").unwrap();
+        assert_eq!(parsed.0, "sample");
+        assert_eq!(parsed.1, "{base:!lower}");
+    }
+
+    #[test]
+    fn parses_injected_column_names() {
+        let cfg = FileColumnConfig::parse(Some("a, b ,c")).unwrap();
+        assert_eq!(cfg.header_for(0).as_deref(), Some("a"));
+        assert_eq!(cfg.header_for(1).as_deref(), Some("b"));
+        assert_eq!(cfg.header_for(2).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn rejects_too_many_injected_names() {
+        let cfg = FileColumnConfig::parse(Some("a,b")).unwrap();
+        let columns = vec![CutColumn::Injected(SpecialColumn::FileBase)];
+        assert!(cfg.validate_count(&columns).is_err());
+    }
 }
