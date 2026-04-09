@@ -19,7 +19,34 @@ type CellValue = Data;
 #[derive(Args, Debug)]
 #[command(
     about = "Interact with Excel workbooks",
-    long_about = "Inspect, preview, export, or build Excel workbooks (xlsx).",
+    long_about = "Inspect, preview, export, or build Excel workbooks (.xlsx).\n\n`tsvkit excel` has 4 mutually exclusive modes:\n  --sheets FILE    list sheet metadata (name, size, inferred types)\n  --preview FILE   show first rows from selected sheets\n  --dump FILE      export selected sheet as TSV\n  --load TSV ...   create a workbook from TSV input(s), including `.tsv`, `.tsv.gz`, and `.tsv.xz`",
+    after_help = "Common workflows:
+  1) Inspect workbook structure
+     tsvkit excel --sheets examples/bioinfo_example.xlsx
+
+  2) Preview one sheet with pretty rendering
+     tsvkit excel --preview book.xlsx -s Sheet1 -n 15 --pretty
+
+  3) Dump a subset of rows/columns as TSV
+     tsvkit excel --dump book.xlsx -s 2 -f 'A:D,score' -r '1:200'
+
+  4) Build a new workbook from multiple TSV files
+     tsvkit excel --load cohort.tsv --load qc.tsv -o report.xlsx
+
+Key option explanations:
+  -s/--sheet NAME|INDEX   repeat to select sheets; default is all/first depending on mode
+  -f/--fields SPEC        for dump mode, select columns by name/index/Excel letters
+  -r/--rows SPEC          for dump mode, select row ranges (supports from-end selectors)
+  --values/--formulas     choose evaluated values (default) or raw formulas
+  --dates MODE            date rendering/writing mode: raw, excel, iso
+  --na STR                blank replacement during dump; NA marker during load
+  --types MODE            load mode type handling: infer or string
+  --max-rows-per-sheet N  split large loads across multiple sheets safely
+
+Tips:
+  - Use --no-header when the first row is data, not column names.
+  - Pair `--dump` with other tsvkit commands for robust TSV pipelines."
+,
     group = ArgGroup::new("mode")
         .args(["sheets", "preview", "dump", "load"])
         .required(true),
@@ -40,7 +67,7 @@ pub struct ExcelArgs {
     #[arg(long = "dump", value_name = "FILE", conflicts_with_all = ["sheets", "preview", "load"])]
     pub dump: Option<PathBuf>,
 
-    /// TSV inputs to load into a new workbook (repeatable)
+    /// TSV inputs to load into a new workbook (repeatable; `.tsv`, `.tsv.gz`, `.tsv.xz` supported)
     #[arg(long = "load", value_name = "TSV", action = ArgAction::Append, conflicts_with_all = ["sheets", "preview", "dump"])]
     pub load: Vec<PathBuf>,
 

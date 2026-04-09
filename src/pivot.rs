@@ -13,7 +13,19 @@ use crate::common::{
 #[derive(Args, Debug)]
 #[command(
     about = "Pivot long-form TSV data into wide tables",
-    long_about = "Convert long (tidy) TSV data into a wide table by promoting row values to columns. Specify which columns remain as identifiers (-i/--index), which column provides the new headers (-c/--column), and which supplies cell values (-v/--value). Use --fill for missing combinations.\n\nExample:\n  tsvkit melt -i id examples/profiles.tsv | tsvkit pivot -i id -c variable -v value"
+    long_about = "Convert long (tidy) TSV data into a wide table by promoting row values to columns. Specify which columns remain as identifiers (-i/--index), which column provides the new headers (-c/--column), and which supplies cell values (-v/--value). Use --fill for missing combinations.\n\nExample:\n  tsvkit melt -i id examples/profiles.tsv | tsvkit pivot -i id -c variable -v value",
+    after_help = "Pivot recipe:
+  -i/--index   row identity columns (can be multiple)
+  -c/--column  values in this column become new output headers
+  -v/--value   values in this column fill pivoted cells
+
+Examples:
+  tsvkit pivot -i sample_id -c analyte -v signal long.tsv
+  tsvkit pivot -i 'subject,visit' -c metric -v value --fill 0 long.tsv
+  tsvkit pivot -H -i 1 -c 2 -v 3 raw_long.tsv
+
+Round-trip with melt:
+  tsvkit melt -i id wide.tsv | tsvkit pivot -i id -c variable -v value"
 )]
 pub struct PivotArgs {
     /// Input TSV file (use '-' for stdin; gz/xz supported)

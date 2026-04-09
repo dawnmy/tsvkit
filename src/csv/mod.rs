@@ -9,7 +9,22 @@ use crate::common::{InputOptions, open_path_reader, should_skip_record};
 #[derive(Args, Debug)]
 #[command(
     about = "Tools for working with comma-separated values",
-    long_about = "Convert comma-separated data to TSV while preserving headers and allowing custom delimiters."
+    long_about = "Convert delimited text (CSV by default) to clean TSV output. Supports stdin/files, custom delimiters, comment skipping, NA replacement for blanks, and forgiving parsing for messy quoted inputs.",
+    after_help = "Examples:
+  tsvkit csv data.csv > data.tsv
+  tsvkit csv --delim ';' data_semicolon.csv > data.tsv
+  tsvkit csv --na NA clinical.csv > clinical.tsv
+  tsvkit csv --lazy-quotes broken_quotes.csv > repaired.tsv
+  zcat data.csv.gz | tsvkit csv - > data.tsv
+
+When to use:
+  - Ingest CSV before running tsvkit cut/filter/summarize.
+  - Normalize messy vendor exports into a stable TSV pipeline.
+
+Option notes:
+  --delim expects exactly one character.
+  -H/--no-header treats the first row as data.
+  --lazy-quotes is useful when embedded quotes are not escaped correctly."
 )]
 pub struct CsvArgs {
     /// Input CSV file (use '-' for stdin; gz/xz supported)

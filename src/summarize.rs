@@ -17,7 +17,24 @@ use crate::common::{
 #[derive(Args, Debug)]
 #[command(
     about = "Grouped statistics over TSV columns",
-    long_about = "Group rows with -g/--group and compute statistics for selected columns via -s/--stat. Each --stat accepts COLUMN=ops, where COLUMN can be names, indices, ranges, or mixes, and ops include sum, mean, median, quantiles (q1, q50, q0.9), var, sd, mode, distinct, and more. Headers are used by default; add -H for headerless input.\n\nExamples:\n  tsvkit summarize -s 'sample1:sample3=mean' examples/profiles.tsv\n  tsvkit summarize -g group -s 'sample1=mean,sd' -s 'sample2:sample3=sum' examples/profiles.tsv\n  tsvkit summarize -s 'sample1=q1,q3,var' examples/profiles.tsv"
+    long_about = "Group rows with -g/--group and compute statistics for selected columns via -s/--stat. Each --stat accepts COLUMN=ops, where COLUMN can be names, indices, ranges, or mixes, and ops include sum, mean, median, quantiles (q1, q50, q0.9), var, sd, mode, distinct, and more. Headers are used by default; add -H for headerless input.\n\nExamples:\n  tsvkit summarize -s 'sample1:sample3=mean' examples/profiles.tsv\n  tsvkit summarize -g group -s 'sample1=mean,sd' -s 'sample2:sample3=sum' examples/profiles.tsv\n  tsvkit summarize -s 'sample1=q1,q3,var' examples/profiles.tsv",
+    after_help = "Stats guide:
+  Basic numeric ops: sum, mean, median, min, max, sd, var
+  Count-like ops: count, distinct(countunique), unique, collapse
+  Robust/advanced: trimmean, iqr, mode, antimode, entropy, argmin, argmax
+  Quantiles: q1, q3, q50, q0.9, p95, etc.
+
+Examples by use case:
+  One-row table summary:
+    tsvkit summarize -s 'value=sum,mean,sd' data.tsv
+  Per-group KPIs:
+    tsvkit summarize -g cohort -s 'score=mean,sd,q1,q3' data.tsv
+  Multiple targets with regex:
+    tsvkit summarize -s '~\"^IL\"=mean,max' cytokines.tsv
+
+Tips:
+  Repeat -s for readability on complex summaries.
+  Use -D when regex/name selectors intentionally match duplicate headers."
 )]
 pub struct SummarizeArgs {
     /// Input TSV file (use '-' for stdin; compressed files are detected automatically)
