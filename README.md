@@ -517,10 +517,21 @@ _Quantiles_
 Quantile aggregators accept any `q*` (fraction) or `p*` (percent) token. Values may include decimals (`q0.05`, `p99.5`) or integers. Non-numeric cells are ignored for numeric summaries and quantiles. `absmin`, `absmax`, `mode`, `antimode`, and `entropy` inspect the original string values, so they work even without numeric conversion.
 
 ### `sort`
-Sort rows by one or more keys. Modifiers: `:n` (numeric), `:nr` (numeric descending), `:r` (reverse text).
+Sort rows by one or more keys. Modifiers: `:n` (numeric), `:nr` (numeric descending), `:r` (reverse text). Use `--group-by` with `--group-head N` or `--group-tail N` to keep top/bottom rows per group after sorting.
+
+`N` behavior:
+- `N >= 1` → keep exactly `N` rows per group (must be an integer).
+- `0 < N < 1` → treat `N` as a fraction of each group's size (`N * group_rows`), then convert to an integer with:
+  - default rounding (`round`)
+  - `--ceil` (round up)
+  - `--floor` (round down)
 
 ```bash
 tsvkit sort -k purity:nr -k contamination_pct examples/samples.tsv
+tsvkit sort -k group -k purity:nr --group-by group --group-head 1 examples/samples.tsv
+tsvkit sort -k group -k purity:nr --group-by group --group-head 3 examples/samples.tsv
+tsvkit sort -k group -k purity:nr --group-by group --group-tail 2 examples/samples.tsv
+tsvkit sort -k group -k purity:nr --group-by group --group-head 0.25 --ceil examples/samples.tsv
 ```
 
 ### `melt`

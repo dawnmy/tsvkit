@@ -5,16 +5,18 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use csv::StringRecord;
+use indexmap::IndexMap;
 
 use crate::common::{
-    InputOptions, default_headers, inconsistent_width_error, parse_single_selector,
-    reader_for_path, resolve_single_selector, should_skip_record,
+    InputOptions, default_headers, inconsistent_width_error, parse_selector_list,
+    parse_single_selector, reader_for_path, resolve_selectors, resolve_single_selector,
+    should_skip_record,
 };
 
 #[derive(Args, Debug)]
 #[command(
     about = "Sort TSV rows by column keys",
-    long_about = "Sort TSV rows by one or more keys. Provide -k/--key with column selectors (names or 1-based indices) and optional modifiers: :n (numeric asc), :nr (numeric desc), :r (reverse text). Repeat -k for additional sort levels. Defaults to header-aware mode; add -H for headerless files.\n\nExamples:\n  tsvkit sort -k count:nr examples/abundance.tsv\n  tsvkit sort -k $1:nr -k $2:r examples/profiles.tsv",
+    long_about = "Sort TSV rows by one or more keys. Provide -k/--key with column selectors (names or 1-based indices) and optional modifiers: :n (numeric asc), :nr (numeric desc), :r (reverse text). Repeat -k for additional sort levels. Defaults to header-aware mode; add -H for headerless files.\n\nExamples:\n  tsvkit sort -k count:nr examples/abundance.tsv\n  tsvkit sort -k $1:nr -k $2:r examples/profiles.tsv\n  tsvkit sort -k group -k score:nr --group-by group --group-head 1 examples/scores.tsv",
     after_help = "Key spec quick reference:
   -k col        text ascending
   -k col:r      text descending
@@ -25,10 +27,14 @@ Multi-key examples:
   tsvkit sort -k group -k score:nr data.tsv
   tsvkit sort -k date -k sample_id data.tsv
   tsvkit sort -H -k 3:n -k 1 raw.tsv
+  tsvkit sort -k cohort -k metric:nr --group-by cohort --group-head 3 data.tsv
+  tsvkit sort -k cohort -k metric:nr --group-by cohort --group-tail 2 data.tsv
+  tsvkit sort -k cohort -k metric:nr --group-by cohort --group-head 0.2 --ceil data.tsv
 
 Tips:
   Stable sort (default) preserves input order for equal keys.
-  Use --unstable for speed when equal-key order does not matter."
+  Use --unstable for speed when equal-key order does not matter.
+  For N < 1, --group-head/--group-tail treat N as a fraction of each group size."
 )]
 pub struct SortArgs {
     /// Input TSV file (use '-' for stdin; gz/xz supported)
@@ -46,6 +52,36 @@ pub struct SortArgs {
     /// Use an unstable sort (faster but does not preserve order of equal keys)
     #[arg(long = "unstable")]
     pub unstable: bool,
+
+    /// Keep one row per group using these columns (comma-separated names/indices/ranges)
+    #[arg(long = "group-by", value_name = "COLS")]
+    pub group_by: Option<String>,
+
+    /// When --group-by is set, keep first N rows per sorted group (N>=1 count, 0<N<1 fraction of group size)
+    #[arg(
+        long = "group-head",
+        value_name = "N",
+        conflicts_with = "group_tail",
+        requires = "group_by"
+    )]
+    pub group_head: Option<f64>,
+
+    /// When --group-by is set, keep last N rows per sorted group (N>=1 count, 0<N<1 fraction of group size)
+    #[arg(
+        long = "group-tail",
+        value_name = "N",
+        conflicts_with = "group_head",
+        requires = "group_by"
+    )]
+    pub group_tail: Option<f64>,
+
+    /// For fractional N (0 < N < 1), round up when converting fraction * group_size to row count
+    #[arg(long = "ceil", conflicts_with = "floor", requires = "group_by")]
+    pub ceil: bool,
+
+    /// For fractional N (0 < N < 1), round down when converting fraction * group_size to row count
+    #[arg(long = "floor", conflicts_with = "ceil", requires = "group_by")]
+    pub floor: bool,
 
     /// Lines starting with this comment character are skipped (set to an uncommon symbol if your header begins with '#')
     #[arg(
@@ -75,6 +111,19 @@ enum SortOrder {
 enum SortMode {
     Text,
     Numeric,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupTake {
+    Head,
+    Tail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FractionRounding {
+    Round,
+    Ceil,
+    Floor,
 }
 
 #[derive(Clone, Debug)]
@@ -183,6 +232,26 @@ pub fn run(args: SortArgs) -> Result<()> {
         records.sort_unstable_by(|a, b| compare_records(a, b, &resolved));
     } else {
         records.sort_by(|a, b| compare_records(a, b, &resolved));
+    }
+
+    if let Some(spec) = args.group_by.as_deref() {
+        let (take_mode, n_spec) = match (args.group_head, args.group_tail) {
+            (Some(n), None) => (GroupTake::Head, n),
+            (None, Some(n)) => (GroupTake::Tail, n),
+            (None, None) => {
+                bail!("--group-by requires either --group-head N or --group-tail N");
+            }
+            (Some(_), Some(_)) => unreachable!("clap enforces conflicts"),
+        };
+        let rounding = if args.ceil {
+            FractionRounding::Ceil
+        } else if args.floor {
+            FractionRounding::Floor
+        } else {
+            FractionRounding::Round
+        };
+        let group_indices = resolve_group_indices(&headers, spec, args.no_header)?;
+        records = pick_n_records_per_group(records, &group_indices, n_spec, rounding, take_mode)?;
     }
 
     for record in records {
@@ -313,6 +382,82 @@ fn parse_number(value: &str) -> Option<f64> {
         .filter(|number| number.is_finite())
 }
 
+fn resolve_group_indices(headers: &[String], group_spec: &str, no_header: bool) -> Result<Vec<usize>> {
+    let selectors = parse_selector_list(group_spec)?;
+    let indices = resolve_selectors(headers, &selectors, no_header)?;
+    if indices.is_empty() {
+        bail!("--group-by must resolve at least one column");
+    }
+    Ok(indices)
+}
+
+fn pick_n_records_per_group(
+    records: Vec<StringRecord>,
+    group_indices: &[usize],
+    n_spec: f64,
+    rounding: FractionRounding,
+    mode: GroupTake,
+) -> Result<Vec<StringRecord>> {
+    match mode {
+        GroupTake::Head => {
+            let mut picked: IndexMap<Vec<String>, Vec<StringRecord>> = IndexMap::new();
+            for record in records {
+                let key = group_indices
+                    .iter()
+                    .map(|&idx| record.get(idx).unwrap_or("").to_string())
+                    .collect::<Vec<_>>();
+                picked.entry(key).or_default().push(record);
+            }
+            let mut output = Vec::new();
+            for group in picked.into_values() {
+                let keep = rows_to_keep(n_spec, group.len(), rounding)?;
+                output.extend(group.into_iter().take(keep));
+            }
+            Ok(output)
+        }
+        GroupTake::Tail => {
+            let mut picked: IndexMap<Vec<String>, Vec<StringRecord>> = IndexMap::new();
+            for record in records {
+                let key = group_indices
+                    .iter()
+                    .map(|&idx| record.get(idx).unwrap_or("").to_string())
+                    .collect::<Vec<_>>();
+                picked.entry(key).or_default().push(record);
+            }
+            let mut output = Vec::new();
+            for group in picked.into_values() {
+                let keep = rows_to_keep(n_spec, group.len(), rounding)?;
+                let skip = group.len().saturating_sub(keep);
+                output.extend(group.into_iter().skip(skip));
+            }
+            Ok(output)
+        }
+    }
+}
+
+fn rows_to_keep(n_spec: f64, group_len: usize, rounding: FractionRounding) -> Result<usize> {
+    if !n_spec.is_finite() {
+        bail!("group row count N must be a finite number");
+    }
+    if n_spec <= 0.0 {
+        bail!("group row count N must be > 0");
+    }
+    if n_spec < 1.0 {
+        let raw = n_spec * group_len as f64;
+        let rounded = match rounding {
+            FractionRounding::Round => raw.round(),
+            FractionRounding::Ceil => raw.ceil(),
+            FractionRounding::Floor => raw.floor(),
+        };
+        return Ok(rounded.max(0.0) as usize);
+    }
+
+    if (n_spec.fract()).abs() > f64::EPSILON {
+        bail!("group row count N must be an integer when N >= 1");
+    }
+    Ok(n_spec as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +507,107 @@ mod tests {
         assert_eq!(spec.selector, "2");
         assert_eq!(spec.order, SortOrder::Desc);
         assert_eq!(spec.mode, SortMode::Text);
+    }
+
+    #[test]
+    fn pick_group_head_records() {
+        let records = vec![
+            StringRecord::from(vec!["A", "10"]),
+            StringRecord::from(vec!["A", "9"]),
+            StringRecord::from(vec!["A", "8"]),
+            StringRecord::from(vec!["B", "7"]),
+        ];
+        let selected = pick_n_records_per_group(
+            records,
+            &[0],
+            2.0,
+            FractionRounding::Round,
+            GroupTake::Head,
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].get(1), Some("10"));
+        assert_eq!(selected[1].get(1), Some("9"));
+        assert_eq!(selected[2].get(1), Some("7"));
+    }
+
+    #[test]
+    fn pick_group_tail_records() {
+        let records = vec![
+            StringRecord::from(vec!["A", "10"]),
+            StringRecord::from(vec!["A", "9"]),
+            StringRecord::from(vec!["A", "8"]),
+            StringRecord::from(vec!["B", "7"]),
+        ];
+        let selected = pick_n_records_per_group(
+            records,
+            &[0],
+            2.0,
+            FractionRounding::Round,
+            GroupTake::Tail,
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].get(1), Some("9"));
+        assert_eq!(selected[1].get(1), Some("8"));
+        assert_eq!(selected[2].get(1), Some("7"));
+    }
+
+    #[test]
+    fn group_head_one_matches_first() {
+        let records = vec![
+            StringRecord::from(vec!["A", "10"]),
+            StringRecord::from(vec!["A", "9"]),
+            StringRecord::from(vec!["B", "7"]),
+        ];
+        let selected = pick_n_records_per_group(
+            records,
+            &[0],
+            1.0,
+            FractionRounding::Round,
+            GroupTake::Head,
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].get(1), Some("10"));
+        assert_eq!(selected[1].get(1), Some("7"));
+    }
+
+    #[test]
+    fn group_tail_one_matches_last() {
+        let records = vec![
+            StringRecord::from(vec!["A", "10"]),
+            StringRecord::from(vec!["A", "9"]),
+            StringRecord::from(vec!["B", "7"]),
+        ];
+        let selected = pick_n_records_per_group(
+            records,
+            &[0],
+            1.0,
+            FractionRounding::Round,
+            GroupTake::Tail,
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].get(1), Some("9"));
+        assert_eq!(selected[1].get(1), Some("7"));
+    }
+
+    #[test]
+    fn fraction_rounding_modes_affect_row_count() {
+        assert_eq!(
+            rows_to_keep(0.34, 3, FractionRounding::Round).unwrap(),
+            1
+        );
+        assert_eq!(rows_to_keep(0.34, 3, FractionRounding::Ceil).unwrap(), 2);
+        assert_eq!(rows_to_keep(0.34, 3, FractionRounding::Floor).unwrap(), 1);
+    }
+
+    #[test]
+    fn rejects_non_integer_above_one() {
+        let err = rows_to_keep(1.5, 10, FractionRounding::Round).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("must be an integer when N >= 1"));
     }
 }
