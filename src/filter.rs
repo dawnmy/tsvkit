@@ -7,7 +7,7 @@ use clap::Args;
 use crate::common::{InputOptions, default_headers, reader_for_path, should_skip_record};
 use crate::expression::{
     EvalDiagnostics, bind_expression, collect_division_denominator_columns,
-    evaluate_with_diagnostics, parse_expression,
+    evaluate_with_diagnostics, parse_expression, RowAccessor,
 };
 
 #[derive(Args, Debug)]
@@ -64,6 +64,10 @@ pub struct FilterArgs {
     /// Ignore rows whose column count differs from the header/first row
     #[arg(short = 'I', long = "ignore-illegal-row")]
     pub ignore_illegal_row: bool,
+
+    /// Replace NA literals with this numeric value before numeric evaluation (e.g. --na 0)
+    #[arg(long = "na", value_name = "VALUE")]
+    pub na_value: Option<f64>,
 }
 
 pub fn run(args: FilterArgs) -> Result<()> {
@@ -97,11 +101,21 @@ pub fn run(args: FilterArgs) -> Result<()> {
         let mut zero_den_rows = 0usize;
         let mut eval_diag = EvalDiagnostics::default();
 
-        if row_has_zero_denominator(&first_record, &denominator_cols) {
-            zero_den_rows += 1;
-        }
-        if evaluate_with_diagnostics(&bound, &first_record, &mut eval_diag) {
-            emit_record(&first_record, &mut writer)?;
+        if let Some(na_value) = args.na_value {
+            let normalized = normalize_record_na(&first_record, na_value);
+            if row_has_zero_denominator(&normalized, &denominator_cols) {
+                zero_den_rows += 1;
+            }
+            if evaluate_with_diagnostics(&bound, &normalized, &mut eval_diag) {
+                emit_record(&first_record, &mut writer)?;
+            }
+        } else {
+            if row_has_zero_denominator(&first_record, &denominator_cols) {
+                zero_den_rows += 1;
+            }
+            if evaluate_with_diagnostics(&bound, &first_record, &mut eval_diag) {
+                emit_record(&first_record, &mut writer)?;
+            }
         }
         let expected_width = first_record.len();
         for record in records {
@@ -109,11 +123,21 @@ pub fn run(args: FilterArgs) -> Result<()> {
             if should_skip_record(&record, &input_opts, Some(expected_width)) {
                 continue;
             }
-            if row_has_zero_denominator(&record, &denominator_cols) {
-                zero_den_rows += 1;
-            }
-            if evaluate_with_diagnostics(&bound, &record, &mut eval_diag) {
-                emit_record(&record, &mut writer)?;
+            if let Some(na_value) = args.na_value {
+                let normalized = normalize_record_na(&record, na_value);
+                if row_has_zero_denominator(&normalized, &denominator_cols) {
+                    zero_den_rows += 1;
+                }
+                if evaluate_with_diagnostics(&bound, &normalized, &mut eval_diag) {
+                    emit_record(&record, &mut writer)?;
+                }
+            } else {
+                if row_has_zero_denominator(&record, &denominator_cols) {
+                    zero_den_rows += 1;
+                }
+                if evaluate_with_diagnostics(&bound, &record, &mut eval_diag) {
+                    emit_record(&record, &mut writer)?;
+                }
             }
         }
         emit_division_warning(
@@ -142,17 +166,33 @@ pub fn run(args: FilterArgs) -> Result<()> {
             if should_skip_record(&record, &input_opts, Some(expected_width)) {
                 continue;
             }
-            if row_has_zero_denominator(&record, &denominator_cols) {
-                zero_den_rows += 1;
-            }
-            if evaluate_with_diagnostics(&bound, &record, &mut eval_diag) {
-                if !header_written {
-                    if let Some(line) = header_line.as_ref() {
-                        writeln!(writer, "{}", line)?;
-                    }
-                    header_written = true;
+            if let Some(na_value) = args.na_value {
+                let normalized = normalize_record_na(&record, na_value);
+                if row_has_zero_denominator(&normalized, &denominator_cols) {
+                    zero_den_rows += 1;
                 }
-                emit_record(&record, &mut writer)?;
+                if evaluate_with_diagnostics(&bound, &normalized, &mut eval_diag) {
+                    if !header_written {
+                        if let Some(line) = header_line.as_ref() {
+                            writeln!(writer, "{}", line)?;
+                        }
+                        header_written = true;
+                    }
+                    emit_record(&record, &mut writer)?;
+                }
+            } else {
+                if row_has_zero_denominator(&record, &denominator_cols) {
+                    zero_den_rows += 1;
+                }
+                if evaluate_with_diagnostics(&bound, &record, &mut eval_diag) {
+                    if !header_written {
+                        if let Some(line) = header_line.as_ref() {
+                            writeln!(writer, "{}", line)?;
+                        }
+                        header_written = true;
+                    }
+                    emit_record(&record, &mut writer)?;
+                }
             }
         }
         emit_division_warning(
@@ -168,7 +208,7 @@ pub fn run(args: FilterArgs) -> Result<()> {
     Ok(())
 }
 
-fn row_has_zero_denominator(record: &csv::StringRecord, columns: &[usize]) -> bool {
+fn row_has_zero_denominator<R: RowAccessor + ?Sized>(record: &R, columns: &[usize]) -> bool {
     columns.iter().any(|&idx| {
         record
             .get(idx)
@@ -178,6 +218,20 @@ fn row_has_zero_denominator(record: &csv::StringRecord, columns: &[usize]) -> bo
     })
 }
 
+fn normalize_record_na(record: &csv::StringRecord, na_value: f64) -> Vec<String> {
+    let replacement = na_value.to_string();
+    record
+        .iter()
+        .map(|value| {
+            if value.trim().eq_ignore_ascii_case("na") {
+                replacement.clone()
+            } else {
+                value.to_string()
+            }
+        })
+        .collect()
+}
+
 fn emit_division_warning(
     zero_den_rows: usize,
     denominator_cols: &[usize],
@@ -185,8 +239,26 @@ fn emit_division_warning(
     no_header: bool,
     divide_by_zero_count: usize,
 ) {
-    if zero_den_rows == 0 || denominator_cols.is_empty() {
-        return;
+    if let Some(warning) = build_division_warning(
+        zero_den_rows,
+        denominator_cols,
+        headers,
+        no_header,
+        divide_by_zero_count,
+    ) {
+        eprintln!("{}", warning);
+    }
+}
+
+fn build_division_warning(
+    zero_den_rows: usize,
+    denominator_cols: &[usize],
+    headers: &[String],
+    no_header: bool,
+    divide_by_zero_count: usize,
+) -> Option<String> {
+    if zero_den_rows == 0 || denominator_cols.is_empty() || divide_by_zero_count == 0 {
+        return None;
     }
     let selector_text = denominator_cols
         .iter()
@@ -204,10 +276,10 @@ fn emit_division_warning(
         .map(|s| format!("{}!=0", s))
         .collect::<Vec<_>>()
         .join(" & ");
-    eprintln!(
+    Some(format!(
         "warning: encountered {} row(s) with denominator value exactly zero while evaluating filter ({} divide-by-zero evaluation(s)). Consider adding a guard such as: {}",
         zero_den_rows, divide_by_zero_count, guard
-    );
+    ))
 }
 
 fn emit_record(
@@ -221,8 +293,32 @@ fn emit_record(
 
 #[cfg(test)]
 mod tests {
+    use super::{build_division_warning, normalize_record_na};
     use crate::expression::{bind_expression, evaluate, parse_expression};
     use csv::StringRecord;
+
+    #[test]
+    fn suppresses_warning_when_no_divide_by_zero_evaluations() {
+        let headers = vec!["a".to_string(), "b".to_string()];
+        let warning = build_division_warning(10, &[1], &headers, false, 0);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn includes_suggested_guard_when_divide_by_zero_occurs() {
+        let headers = vec!["a".to_string(), "b".to_string()];
+        let warning = build_division_warning(3, &[1], &headers, false, 2)
+            .expect("expected warning");
+        assert!(warning.contains("2 divide-by-zero evaluation(s)"));
+        assert!(warning.contains("${b}!=0"));
+    }
+
+    #[test]
+    fn normalize_record_replaces_na_literals() {
+        let row = StringRecord::from(vec!["NA", "na", "1.2"]);
+        let normalized = normalize_record_na(&row, 0.0);
+        assert_eq!(normalized, vec!["0", "0", "1.2"]);
+    }
 
     #[test]
     fn parses_numeric_columns_with_minus_operator() {
