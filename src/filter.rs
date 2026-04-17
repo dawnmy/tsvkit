@@ -65,7 +65,7 @@ pub struct FilterArgs {
     #[arg(short = 'I', long = "ignore-illegal-row")]
     pub ignore_illegal_row: bool,
 
-    /// Replace NA literals with this numeric value before numeric evaluation (e.g. --na 0)
+    /// Replace missing/NA tokens (empty, NA, NaN) with this numeric value before numeric evaluation (default: 0)
     #[arg(long = "na", value_name = "VALUE")]
     pub na_value: Option<f64>,
 }
@@ -101,21 +101,13 @@ pub fn run(args: FilterArgs) -> Result<()> {
         let mut zero_den_rows = 0usize;
         let mut eval_diag = EvalDiagnostics::default();
 
-        if let Some(na_value) = args.na_value {
-            let normalized = normalize_record_na(&first_record, na_value);
-            if row_has_zero_denominator(&normalized, &denominator_cols) {
-                zero_den_rows += 1;
-            }
-            if evaluate_with_diagnostics(&bound, &normalized, &mut eval_diag) {
-                emit_record(&first_record, &mut writer)?;
-            }
-        } else {
-            if row_has_zero_denominator(&first_record, &denominator_cols) {
-                zero_den_rows += 1;
-            }
-            if evaluate_with_diagnostics(&bound, &first_record, &mut eval_diag) {
-                emit_record(&first_record, &mut writer)?;
-            }
+        let na_value = args.na_value.unwrap_or(0.0);
+        let normalized = normalize_record_na(&first_record, na_value);
+        if row_has_zero_denominator(&normalized, &denominator_cols) {
+            zero_den_rows += 1;
+        }
+        if evaluate_with_diagnostics(&bound, &normalized, &mut eval_diag) {
+            emit_record(&first_record, &mut writer)?;
         }
         let expected_width = first_record.len();
         for record in records {
@@ -123,21 +115,12 @@ pub fn run(args: FilterArgs) -> Result<()> {
             if should_skip_record(&record, &input_opts, Some(expected_width)) {
                 continue;
             }
-            if let Some(na_value) = args.na_value {
-                let normalized = normalize_record_na(&record, na_value);
-                if row_has_zero_denominator(&normalized, &denominator_cols) {
-                    zero_den_rows += 1;
-                }
-                if evaluate_with_diagnostics(&bound, &normalized, &mut eval_diag) {
-                    emit_record(&record, &mut writer)?;
-                }
-            } else {
-                if row_has_zero_denominator(&record, &denominator_cols) {
-                    zero_den_rows += 1;
-                }
-                if evaluate_with_diagnostics(&bound, &record, &mut eval_diag) {
-                    emit_record(&record, &mut writer)?;
-                }
+            let normalized = normalize_record_na(&record, na_value);
+            if row_has_zero_denominator(&normalized, &denominator_cols) {
+                zero_den_rows += 1;
+            }
+            if evaluate_with_diagnostics(&bound, &normalized, &mut eval_diag) {
+                emit_record(&record, &mut writer)?;
             }
         }
         emit_division_warning(
@@ -161,38 +144,24 @@ pub fn run(args: FilterArgs) -> Result<()> {
         let mut header_written = false;
         let mut zero_den_rows = 0usize;
         let mut eval_diag = EvalDiagnostics::default();
+        let na_value = args.na_value.unwrap_or(0.0);
         for record in reader.records() {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
             if should_skip_record(&record, &input_opts, Some(expected_width)) {
                 continue;
             }
-            if let Some(na_value) = args.na_value {
-                let normalized = normalize_record_na(&record, na_value);
-                if row_has_zero_denominator(&normalized, &denominator_cols) {
-                    zero_den_rows += 1;
-                }
-                if evaluate_with_diagnostics(&bound, &normalized, &mut eval_diag) {
-                    if !header_written {
-                        if let Some(line) = header_line.as_ref() {
-                            writeln!(writer, "{}", line)?;
-                        }
-                        header_written = true;
+            let normalized = normalize_record_na(&record, na_value);
+            if row_has_zero_denominator(&normalized, &denominator_cols) {
+                zero_den_rows += 1;
+            }
+            if evaluate_with_diagnostics(&bound, &normalized, &mut eval_diag) {
+                if !header_written {
+                    if let Some(line) = header_line.as_ref() {
+                        writeln!(writer, "{}", line)?;
                     }
-                    emit_record(&record, &mut writer)?;
+                    header_written = true;
                 }
-            } else {
-                if row_has_zero_denominator(&record, &denominator_cols) {
-                    zero_den_rows += 1;
-                }
-                if evaluate_with_diagnostics(&bound, &record, &mut eval_diag) {
-                    if !header_written {
-                        if let Some(line) = header_line.as_ref() {
-                            writeln!(writer, "{}", line)?;
-                        }
-                        header_written = true;
-                    }
-                    emit_record(&record, &mut writer)?;
-                }
+                emit_record(&record, &mut writer)?;
             }
         }
         emit_division_warning(
@@ -223,7 +192,11 @@ fn normalize_record_na(record: &csv::StringRecord, na_value: f64) -> Vec<String>
     record
         .iter()
         .map(|value| {
-            if value.trim().eq_ignore_ascii_case("na") {
+            let trimmed = value.trim();
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("na")
+                || trimmed.eq_ignore_ascii_case("nan")
+            {
                 replacement.clone()
             } else {
                 value.to_string()
@@ -315,9 +288,9 @@ mod tests {
 
     #[test]
     fn normalize_record_replaces_na_literals() {
-        let row = StringRecord::from(vec!["NA", "na", "1.2"]);
+        let row = StringRecord::from(vec!["NA", "na", "NaN", "", "1.2"]);
         let normalized = normalize_record_na(&row, 0.0);
-        assert_eq!(normalized, vec!["0", "0", "1.2"]);
+        assert_eq!(normalized, vec!["0", "0", "0", "0", "1.2"]);
     }
 
     #[test]
