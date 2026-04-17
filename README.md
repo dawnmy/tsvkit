@@ -331,6 +331,8 @@ tsvkit filter -e 'upper($group) == "CASE"' examples/samples.tsv
 
 If any `/` denominator evaluates to exactly `0`, `filter` emits a warning to stderr with the affected row count and a suggested guard (for example `$col!=0` or `$col>0`).
 
+Missing numeric tokens are normalized before filter expression evaluation: empty strings, `NA`, and `NaN` are treated as `0` by default, or as the value supplied via `--na VALUE`.
+
 **Expression building blocks for `filter`**
 
 | Building block | Examples | Notes |
