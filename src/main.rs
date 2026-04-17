@@ -17,10 +17,13 @@ mod melt;
 mod mutate;
 mod pivot;
 mod pretty;
+mod rename;
+mod separate;
 mod slice;
 mod sort;
 mod summarize;
 mod transpose;
+mod unite;
 
 #[derive(Parser)]
 #[command(
@@ -61,6 +64,12 @@ enum Commands {
     Transpose(transpose::TransposeArgs),
     /// Slice rows by 1-based index/ranges (supports from-end selectors)
     Slice(slice::SliceArgs),
+    /// Rename header columns using selector assignments
+    Rename(rename::RenameArgs),
+    /// Split one character column into multiple columns
+    Separate(separate::SeparateArgs),
+    /// Combine multiple character columns into one column
+    Unite(unite::UniteArgs),
     /// Excel helpers: inspect sheets, preview, dump TSV, or load TSV into xlsx
     Excel(excel::ExcelArgs),
     /// CSV utilities (convert CSV/TSV-like delimited text into TSV)
@@ -85,6 +94,9 @@ fn main() -> Result<()> {
         Commands::Head(args) => head::run(args),
         Commands::Transpose(args) => transpose::run(args),
         Commands::Slice(args) => slice::run(args),
+        Commands::Rename(args) => rename::run(args),
+        Commands::Separate(args) => separate::run(args),
+        Commands::Unite(args) => unite::run(args),
         Commands::Excel(args) => excel::run(args, &raw_args),
         Commands::Csv(args) => csv::run(args),
         Commands::Info(args) => info::run(args),

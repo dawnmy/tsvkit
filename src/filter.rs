@@ -5,7 +5,10 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::common::{InputOptions, default_headers, reader_for_path, should_skip_record};
-use crate::expression::{bind_expression, evaluate, parse_expression};
+use crate::expression::{
+    EvalDiagnostics, bind_expression, collect_division_denominator_columns,
+    evaluate_with_diagnostics, parse_expression,
+};
 
 #[derive(Args, Debug)]
 #[command(
@@ -90,8 +93,14 @@ pub fn run(args: FilterArgs) -> Result<()> {
         };
         let headers = default_headers(first_record.len());
         let bound = bind_expression(expr_ast, &headers, true)?;
+        let denominator_cols = collect_division_denominator_columns(&bound);
+        let mut zero_den_rows = 0usize;
+        let mut eval_diag = EvalDiagnostics::default();
 
-        if evaluate(&bound, &first_record) {
+        if row_has_zero_denominator(&first_record, &denominator_cols) {
+            zero_den_rows += 1;
+        }
+        if evaluate_with_diagnostics(&bound, &first_record, &mut eval_diag) {
             emit_record(&first_record, &mut writer)?;
         }
         let expected_width = first_record.len();
@@ -100,10 +109,20 @@ pub fn run(args: FilterArgs) -> Result<()> {
             if should_skip_record(&record, &input_opts, Some(expected_width)) {
                 continue;
             }
-            if evaluate(&bound, &record) {
+            if row_has_zero_denominator(&record, &denominator_cols) {
+                zero_den_rows += 1;
+            }
+            if evaluate_with_diagnostics(&bound, &record, &mut eval_diag) {
                 emit_record(&record, &mut writer)?;
             }
         }
+        emit_division_warning(
+            zero_den_rows,
+            &denominator_cols,
+            &headers,
+            true,
+            eval_diag.divide_by_zero_count,
+        );
     } else {
         let headers = reader
             .headers()
@@ -112,15 +131,21 @@ pub fn run(args: FilterArgs) -> Result<()> {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
         let bound = bind_expression(expr_ast, &headers, false)?;
+        let denominator_cols = collect_division_denominator_columns(&bound);
         let expected_width = headers.len();
         let header_line = (!headers.is_empty()).then(|| headers.join("\t"));
         let mut header_written = false;
+        let mut zero_den_rows = 0usize;
+        let mut eval_diag = EvalDiagnostics::default();
         for record in reader.records() {
             let record = record.with_context(|| format!("failed reading from {:?}", args.file))?;
             if should_skip_record(&record, &input_opts, Some(expected_width)) {
                 continue;
             }
-            if evaluate(&bound, &record) {
+            if row_has_zero_denominator(&record, &denominator_cols) {
+                zero_den_rows += 1;
+            }
+            if evaluate_with_diagnostics(&bound, &record, &mut eval_diag) {
                 if !header_written {
                     if let Some(line) = header_line.as_ref() {
                         writeln!(writer, "{}", line)?;
@@ -130,10 +155,59 @@ pub fn run(args: FilterArgs) -> Result<()> {
                 emit_record(&record, &mut writer)?;
             }
         }
+        emit_division_warning(
+            zero_den_rows,
+            &denominator_cols,
+            &headers,
+            false,
+            eval_diag.divide_by_zero_count,
+        );
     }
 
     writer.flush()?;
     Ok(())
+}
+
+fn row_has_zero_denominator(record: &csv::StringRecord, columns: &[usize]) -> bool {
+    columns.iter().any(|&idx| {
+        record
+            .get(idx)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .map(|v| v == 0.0)
+            .unwrap_or(false)
+    })
+}
+
+fn emit_division_warning(
+    zero_den_rows: usize,
+    denominator_cols: &[usize],
+    headers: &[String],
+    no_header: bool,
+    divide_by_zero_count: usize,
+) {
+    if zero_den_rows == 0 || denominator_cols.is_empty() {
+        return;
+    }
+    let selector_text = denominator_cols
+        .iter()
+        .map(|idx| {
+            if no_header {
+                format!("${}", idx + 1)
+            } else {
+                let name = headers.get(*idx).map(|s| s.as_str()).unwrap_or("");
+                format!("${{{}}}", name)
+            }
+        })
+        .collect::<Vec<_>>();
+    let guard = selector_text
+        .iter()
+        .map(|s| format!("{}!=0", s))
+        .collect::<Vec<_>>()
+        .join(" & ");
+    eprintln!(
+        "warning: encountered {} row(s) with denominator value exactly zero while evaluating filter ({} divide-by-zero evaluation(s)). Consider adding a guard such as: {}",
+        zero_den_rows, divide_by_zero_count, guard
+    );
 }
 
 fn emit_record(

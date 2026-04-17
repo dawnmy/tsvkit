@@ -28,7 +28,7 @@ Option notes:
 )]
 pub struct CsvArgs {
     /// Input CSV file (use '-' for stdin; gz/xz supported)
-    #[arg(value_name = "FILE", required = true)]
+    #[arg(value_name = "FILE", default_value = "-")]
     pub input: PathBuf,
 
     /// CSV delimiter character (default ',')
