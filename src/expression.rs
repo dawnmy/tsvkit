@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -290,22 +291,29 @@ pub struct EvalValue<'a> {
     pub numeric: Option<f64>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct EvalDiagnostics {
+    pub divide_by_zero_count: usize,
+}
+
 pub struct EvalContext<'a, R>
 where
     R: RowAccessor + ?Sized,
 {
     row: &'a R,
     regex_captures: Option<Vec<String>>,
+    diagnostics: Option<&'a mut EvalDiagnostics>,
 }
 
 impl<'a, R> EvalContext<'a, R>
 where
     R: RowAccessor + ?Sized,
 {
-    pub fn new(row: &'a R) -> Self {
+    pub fn new(row: &'a R, diagnostics: Option<&'a mut EvalDiagnostics>) -> Self {
         EvalContext {
             row,
             regex_captures: None,
+            diagnostics,
         }
     }
 
@@ -328,13 +336,32 @@ where
     fn restore_captures(&mut self, captures: Option<Vec<String>>) {
         self.regex_captures = captures;
     }
+
+    fn note_division_by_zero(&mut self) {
+        if let Some(diag) = self.diagnostics.as_deref_mut() {
+            diag.divide_by_zero_count += 1;
+        }
+    }
 }
 
+#[allow(dead_code)]
 pub fn evaluate<R>(expr: &BoundExpr, row: &R) -> bool
 where
     R: RowAccessor + ?Sized,
 {
-    let mut ctx = EvalContext::new(row);
+    let mut ctx = EvalContext::new(row, None);
+    evaluate_with_context(expr, &mut ctx)
+}
+
+pub fn evaluate_with_diagnostics<R>(
+    expr: &BoundExpr,
+    row: &R,
+    diagnostics: &mut EvalDiagnostics,
+) -> bool
+where
+    R: RowAccessor + ?Sized,
+{
+    let mut ctx = EvalContext::new(row, Some(diagnostics));
     evaluate_with_context(expr, &mut ctx)
 }
 
@@ -364,7 +391,7 @@ pub fn eval_value<'a, R>(value: &'a BoundValue, row: &'a R) -> EvalValue<'a>
 where
     R: RowAccessor + ?Sized,
 {
-    let mut ctx = EvalContext::new(row);
+    let mut ctx = EvalContext::new(row, None);
     eval_value_with_context(value, &mut ctx)
 }
 
@@ -439,7 +466,8 @@ where
                     BinaryOp::Sub => numeric_eval(a - b),
                     BinaryOp::Mul => numeric_eval(a * b),
                     BinaryOp::Div => {
-                        if b.abs() < f64::EPSILON {
+                        if b == 0.0 {
+                            ctx.note_division_by_zero();
                             empty_eval()
                         } else {
                             numeric_eval(a / b)
@@ -662,8 +690,100 @@ pub fn evaluate_truthy<'a, R>(value: &'a BoundValue, row: &'a R) -> bool
 where
     R: RowAccessor + ?Sized,
 {
-    let mut ctx = EvalContext::new(row);
+    let mut ctx = EvalContext::new(row, None);
     evaluate_truthy_with_context(value, &mut ctx)
+}
+
+pub fn collect_division_denominator_columns(expr: &BoundExpr) -> Vec<usize> {
+    let mut out = HashSet::new();
+    collect_div_cols_expr(expr, &mut out);
+    let mut cols = out.into_iter().collect::<Vec<_>>();
+    cols.sort_unstable();
+    cols
+}
+
+fn collect_div_cols_expr(expr: &BoundExpr, out: &mut HashSet<usize>) {
+    match expr {
+        BoundExpr::Or(lhs, rhs) | BoundExpr::And(lhs, rhs) => {
+            collect_div_cols_expr(lhs, out);
+            collect_div_cols_expr(rhs, out);
+        }
+        BoundExpr::Not(inner) => collect_div_cols_expr(inner, out),
+        BoundExpr::Compare(lhs, _, rhs) => {
+            collect_div_cols_value(lhs, out);
+            collect_div_cols_value(rhs, out);
+        }
+        BoundExpr::RegexMatch { value, .. } | BoundExpr::Value(value) => {
+            collect_div_cols_value(value, out)
+        }
+    }
+}
+
+fn collect_div_cols_value(value: &BoundValue, out: &mut HashSet<usize>) {
+    match value {
+        BoundValue::Unary(_, inner) | BoundValue::Function(_, inner) => {
+            collect_div_cols_value(inner, out)
+        }
+        BoundValue::Binary(BinaryOp::Div, left, right) => {
+            collect_div_cols_value(left, out);
+            match &**right {
+                BoundValue::Column(idx) => {
+                    out.insert(*idx);
+                }
+                BoundValue::Columns(indices) => {
+                    for idx in indices {
+                        out.insert(*idx);
+                    }
+                }
+                other => collect_div_cols_value(other, out),
+            }
+        }
+        BoundValue::Binary(_, left, right) => {
+            collect_div_cols_value(left, out);
+            collect_div_cols_value(right, out);
+        }
+        BoundValue::CaseWhen { branches, default } => {
+            for (cond, result) in branches {
+                collect_div_cols_expr(cond, out);
+                collect_div_cols_value(result, out);
+            }
+            if let Some(default) = default {
+                collect_div_cols_value(default, out);
+            }
+        }
+        BoundValue::Switch {
+            target,
+            branches,
+            default,
+        } => {
+            collect_div_cols_value(target, out);
+            for (vals, result) in branches {
+                for v in vals {
+                    collect_div_cols_value(v, out);
+                }
+                collect_div_cols_value(result, out);
+            }
+            if let Some(default) = default {
+                collect_div_cols_value(default, out);
+            }
+        }
+        BoundValue::RegexCall { value, pattern } => {
+            collect_div_cols_value(value, out);
+            if let RegexPattern::Dynamic(v) = pattern {
+                collect_div_cols_value(v, out);
+            }
+        }
+        BoundValue::List(items) => {
+            for item in items {
+                collect_div_cols_value(item, out);
+            }
+        }
+        BoundValue::Column(_)
+        | BoundValue::Columns(_)
+        | BoundValue::String(_)
+        | BoundValue::Number(_)
+        | BoundValue::Aggregate(_) => {}
+    }
 }
 
 fn evaluate_compare<'a, R>(
@@ -1142,6 +1262,29 @@ mod tests {
         let row: Vec<String> = Vec::new();
         let eval = eval_value(&bound, &row);
         assert_eq!(eval.numeric, Some(512.0));
+    }
+
+    #[test]
+    fn division_keeps_non_zero_tiny_denominator() {
+        let expr = parse_expression("($1/$2) > 1").unwrap();
+        let headers = vec!["a".to_string(), "b".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = vec!["1".to_string(), "1e-30".to_string()];
+        assert!(evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn collects_division_denominator_columns() {
+        let expr = parse_expression("($1/$2)>0 & ($3/$4)>0").unwrap();
+        let headers = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let cols = collect_division_denominator_columns(&bound);
+        assert_eq!(cols, vec![1, 3]);
     }
 
     #[test]

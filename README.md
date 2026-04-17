@@ -29,6 +29,9 @@
   - [`transpose`](#transpose)
   - [`excel`](#excel)
   - [`csv`](#csv)
+  - [`rename`](#rename)
+  - [`separate`](#separate)
+  - [`unite`](#unite)
 - [Additional tips](#additional-tips)
 
 ## Overview
@@ -111,6 +114,9 @@ The list below provides a one-line description of every `tsvkit` subcommand. Eac
 - [`transpose`](#transpose) — transpose rows and columns.
 - [`excel`](#excel) — inspect, preview, export, or build `.xlsx` workbooks.
 - [`csv`](#csv) — convert delimited text to TSV with custom separators.
+- [`rename`](#rename) — rename header columns via selector assignments.
+- [`separate`](#separate) — split one character column into multiple columns.
+- [`unite`](#unite) — combine multiple columns into one character column.
 
 ## Core concepts
 These conventions appear across the toolkit; understanding them once makes each subcommand predictable.
@@ -322,6 +328,8 @@ Case helpers are supported in filter expressions:
 tsvkit filter -e 'cap($1) == "HELLO"' data.tsv
 tsvkit filter -e 'upper($group) == "CASE"' examples/samples.tsv
 ```
+
+If any `/` denominator evaluates to exactly `0`, `filter` emits a warning to stderr with the affected row count and a suggested guard (for example `$col!=0` or `$col>0`).
 
 **Expression building blocks for `filter`**
 
@@ -676,6 +684,51 @@ Compressed inputs work via the same auto-detection as other commands.
 tsvkit csv examples/data.csv > examples/data.tsv
 tsvkit csv examples/semicolon.csv --delim ';' -H > tmp.tsv
 ```
+
+### `rename`
+Rename header columns without modifying row values.
+
+```bash
+tsvkit rename -e 'sample_id=id;group=cohort' examples/samples.tsv
+tsvkit rename -e '1,3,sample_id=["id","visit","sample"]' examples/samples.tsv
+tsvkit rename -e ':=["id","subject","arm","visit","purity","dna","rna","contam","tech"]' examples/samples.tsv
+```
+
+Notes:
+- Selectors use normal selector syntax (`name`, `1`, `2:5`, `~"regex"`); **do not** prefix with `$`.
+- For `selectors=[...]`, the number of replacement names must match the number of selected columns.
+- `:=...` replaces the full header list in order.
+
+For headerless inputs, pass `-H` and provide all column names:
+
+```bash
+cat no_header.tsv | tsvkit rename -H -e ':=c1,c2,c3'
+```
+
+### `separate`
+Split one character column into multiple columns by delimiter text or regex.
+
+```bash
+tsvkit separate -f sample_id --into subject,visit --sep '-' examples/samples.tsv
+tsvkit separate -f barcode --into part1,part2 --regex-sep '\\|' data.tsv
+```
+
+Defaults:
+- If `--into` is omitted, output names default to `<source>_1,<source>_2`.
+- By default the source column is replaced; use `--keep` to retain it.
+
+### `unite`
+Combine selected columns into one output column.
+
+```bash
+tsvkit unite -f subject_id,timepoint --name subject_time --sep '_' examples/samples.tsv
+tsvkit unite -f '1:3' --name key --sep '|' -H data.tsv
+```
+
+Defaults:
+- Output name defaults to `united`.
+- Selected source columns are removed unless `--keep` is provided.
+- Use `--na-rm` to skip empty pieces while joining.
 
 ## Additional tips
 - `tsvkit` automatically detects `.tsv`, `.tsv.gz`, and `.tsv.xz`. Pipe from `curl`/`zcat` for other formats.
