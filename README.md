@@ -344,6 +344,7 @@ Missing numeric tokens are normalized before filter expression evaluation: empty
 | Logical | `($purity >= 0.9) & ($group == "case")` | `&`, `\|`, and `!` (or `and`, `or`, `not`). |
 | Numeric functions | `log2($total)`, `sqrt($reads)` | See [Expression language essentials](#expression-language-essentials). |
 | Row-wise aggregators | `sum($dna_ug:$rna_ug)`, `mode($1,$3)`, `countunique($gene:)` | Same catalog as [`summarize`](#summarize): totals, quantiles (`q*` / `p*`), variance/SD, products, entropy, argmin/argmax, membership stats. Works with ranges, lists, and open selectors. |
+| Regex match counters | `countmatch($gene:$notes, "(?i)kinase") >= 2`, `countmatch($1,$name,$sex:, "(nd|NA)", "i")` | Returns how many selected columns match a regex. Optional 3rd mode argument accepts `"s"`/`"sensitive"` (default) or `"i"`/`"insensitive"`. |
 | Regex match | `$tech ~ "sRNA"`, `$notes !~ "(?i)fail"` | Patterns follow Rust `regex` syntax. `(?i)` enables case-insensitive matching. |
 | Regex across ranges | `$gene:$notes ~ "kinase"`, `~ "control"` | When the left-hand side is omitted, `~` scans all columns. |
 | Membership | `$group in ["case","control"]`, `$rank in [1:3]` | Right-hand side must be a list literal or numeric range. |
@@ -465,6 +466,13 @@ tsvkit mutate -e 'v1=cap($2)' -e 'v2=upper($group)' data.tsv
 | Quantiles | `q*` (`q1`, `q0.9`, `q_0_25`), `p*` (`p95`, `p99.5`) | Fractions `0–1` and percents `0–100`; underscores may replace dots. |
 
 Aggregators accept any range, list, or open-ended selector (`sum($1,$3:)`). Non-numeric cells are skipped for numeric summaries. Results are appended as new columns unless you assign them back to an existing name.
+
+For regex-based per-row hit counting across multiple columns, use `countmatch(selectors, pattern[, mode])`:
+
+```bash
+tsvkit filter -e 'countmatch($1,$name,$sex:, "(nd|ND)") >= 2' data.tsv
+tsvkit filter -e 'countmatch($1,$name,$sex:, "(nd|na)", "i") >= 2' data.tsv
+```
 
 ### `summarize`
 Group rows and compute descriptive statistics. Without `-g/--group`, the entire table is treated as a single group.
