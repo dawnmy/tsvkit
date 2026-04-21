@@ -36,6 +36,11 @@ pub enum ValueExpr {
         default: Option<Box<ValueExpr>>,
     },
     RegexCall(Box<ValueExpr>, Box<ValueExpr>),
+    CountMatch {
+        selectors: Vec<ColumnSelector>,
+        pattern: Box<ValueExpr>,
+        case_insensitive: bool,
+    },
     List(Vec<ValueExpr>),
 }
 
@@ -257,6 +262,10 @@ pub enum BoundValue {
         value: Box<BoundValue>,
         pattern: RegexPattern,
     },
+    CountMatch {
+        columns: Vec<usize>,
+        pattern: RegexPattern,
+    },
     List(Vec<BoundValue>),
 }
 
@@ -283,7 +292,10 @@ pub enum BoundExpr {
 #[derive(Debug, Clone)]
 pub(crate) enum RegexPattern {
     Static(Arc<Regex>),
-    Dynamic(Box<BoundValue>),
+    Dynamic {
+        value: Box<BoundValue>,
+        case_insensitive: bool,
+    },
 }
 
 pub struct EvalValue<'a> {
@@ -618,12 +630,11 @@ where
             let hay_text = hay.text.into_owned();
             let captures = match pattern {
                 RegexPattern::Static(regex) => regex.captures(&hay_text),
-                RegexPattern::Dynamic(bound) => {
-                    let pat_eval = eval_value_with_context(bound, ctx);
-                    Regex::new(pat_eval.text.as_ref())
-                        .ok()
-                        .and_then(|regex| regex.captures(&hay_text))
-                }
+                RegexPattern::Dynamic {
+                    value,
+                    case_insensitive,
+                } => compile_dynamic_regex(value, *case_insensitive, ctx)
+                    .and_then(|regex| regex.captures(&hay_text)),
             };
             if let Some(captures) = captures {
                 let mut values = Vec::with_capacity(captures.len());
@@ -656,6 +667,24 @@ where
                 text: Cow::Owned(combined),
                 numeric: None,
             }
+        }
+        BoundValue::CountMatch { columns, pattern } => {
+            let regex = match pattern {
+                RegexPattern::Static(regex) => Some(regex.as_ref().clone()),
+                RegexPattern::Dynamic {
+                    value,
+                    case_insensitive,
+                } => compile_dynamic_regex(value, *case_insensitive, ctx),
+            };
+            let count = regex
+                .map(|regex| {
+                    columns
+                        .iter()
+                        .filter(|&&idx| regex.is_match(ctx.row().get(idx).unwrap_or("")))
+                        .count() as f64
+                })
+                .unwrap_or(0.0);
+            numeric_eval(count)
         }
     }
 }
@@ -769,8 +798,13 @@ fn collect_div_cols_value(value: &BoundValue, out: &mut HashSet<usize>) {
         }
         BoundValue::RegexCall { value, pattern } => {
             collect_div_cols_value(value, out);
-            if let RegexPattern::Dynamic(v) = pattern {
-                collect_div_cols_value(v, out);
+            if let RegexPattern::Dynamic { value, .. } = pattern {
+                collect_div_cols_value(value, out);
+            }
+        }
+        BoundValue::CountMatch { pattern, .. } => {
+            if let RegexPattern::Dynamic { value, .. } = pattern {
+                collect_div_cols_value(value, out);
             }
         }
         BoundValue::List(items) => {
@@ -913,10 +947,11 @@ where
                 regex.is_match(hay.text.as_ref())
             }
         },
-        RegexPattern::Dynamic(bound) => {
-            let pat_eval = eval_value_with_context(bound, ctx);
-            let pattern_text = pat_eval.text.as_ref();
-            if let Ok(regex) = Regex::new(pattern_text) {
+        RegexPattern::Dynamic {
+            value: dynamic_value,
+            case_insensitive,
+        } => {
+            if let Some(regex) = compile_dynamic_regex(dynamic_value, *case_insensitive, ctx) {
                 match value {
                     BoundValue::Column(idx) => regex.is_match(ctx.row().get(*idx).unwrap_or("")),
                     BoundValue::Columns(indices) => indices
@@ -1045,6 +1080,26 @@ fn bind_value(value: ValueExpr, headers: &[String], no_header: bool) -> Result<B
                 pattern: bound_pattern,
             })
         }
+        ValueExpr::CountMatch {
+            selectors,
+            pattern,
+            case_insensitive,
+        } => {
+            let mut indices = Vec::new();
+            for selector in selectors {
+                let mut resolved = resolve_selectors(headers, &[selector], no_header)?;
+                indices.append(&mut resolved);
+            }
+            if indices.is_empty() {
+                bail!("countmatch selector resolved to no columns");
+            }
+            let bound_pattern = bind_regex_pattern(*pattern, headers, no_header)?;
+            let pattern = set_pattern_case_insensitive(bound_pattern, case_insensitive)?;
+            Ok(BoundValue::CountMatch {
+                columns: indices,
+                pattern,
+            })
+        }
         ValueExpr::List(items) => {
             let mut bound_items = Vec::with_capacity(items.len());
             for item in items {
@@ -1071,6 +1126,44 @@ fn ensure_membership_target(value: &BoundValue) -> Result<()> {
     }
 }
 
+fn parse_countmatch_mode(mode: Option<&ValueExpr>) -> Result<bool> {
+    let Some(mode) = mode else {
+        return Ok(false);
+    };
+    let ValueExpr::String(text) = mode else {
+        bail!("countmatch() mode must be a string literal");
+    };
+    match text.to_ascii_lowercase().as_str() {
+        "s" | "sensitive" | "case" => Ok(false),
+        "i" | "insensitive" | "nocase" | "ignorecase" => Ok(true),
+        other => bail!(
+            "unsupported countmatch() mode '{}': use \"s\"/\"sensitive\" or \"i\"/\"insensitive\"",
+            other
+        ),
+    }
+}
+
+fn set_pattern_case_insensitive(pattern: RegexPattern, case_insensitive: bool) -> Result<RegexPattern> {
+    if !case_insensitive {
+        return Ok(pattern);
+    }
+    match pattern {
+        RegexPattern::Static(regex) => {
+            let wrapped = format!("(?i:{})", regex.as_str());
+            let rebuilt = Regex::new(&wrapped)
+                .with_context(|| format!("invalid regex pattern '{}'", regex.as_str()))?;
+            Ok(RegexPattern::Static(Arc::new(rebuilt)))
+        }
+        RegexPattern::Dynamic {
+            value,
+            case_insensitive: _,
+        } => Ok(RegexPattern::Dynamic {
+            value,
+            case_insensitive: true,
+        }),
+    }
+}
+
 fn bind_regex_pattern(
     value: ValueExpr,
     headers: &[String],
@@ -1084,9 +1177,29 @@ fn bind_regex_pattern(
         }
         other => {
             let bound = bind_value(other, headers, no_header)?;
-            Ok(RegexPattern::Dynamic(Box::new(bound)))
+            Ok(RegexPattern::Dynamic {
+                value: Box::new(bound),
+                case_insensitive: false,
+            })
         }
     }
+}
+
+fn compile_dynamic_regex<'a, R>(
+    value: &'a BoundValue,
+    case_insensitive: bool,
+    ctx: &mut EvalContext<'a, R>,
+) -> Option<Regex>
+where
+    R: RowAccessor + ?Sized,
+{
+    let pat_eval = eval_value_with_context(value, ctx);
+    let pattern_text = if case_insensitive {
+        format!("(?i:{})", pat_eval.text)
+    } else {
+        pat_eval.text.into_owned()
+    };
+    Regex::new(&pattern_text).ok()
 }
 
 fn compare_numeric<F>(left: &EvalValue<'_>, right: &EvalValue<'_>, cmp: F) -> bool
@@ -1472,6 +1585,43 @@ mod tests {
             err.to_string()
                 .contains("right-hand side of 'in'/'!in' must be a list")
         );
+    }
+
+    #[test]
+    fn row_aggregate_accepts_open_ended_range() {
+        let expr = parse_expression("countunique($3:) >= 2").unwrap();
+        let headers = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = csv::StringRecord::from(vec!["x", "y", "nd", "ND"]);
+        assert!(evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn countmatch_counts_regex_hits_across_selected_columns() {
+        let expr = parse_expression("countmatch($1,$2:$4, \"(nd|ND)\") >= 2").unwrap();
+        let headers = vec![
+            "c1".to_string(),
+            "c2".to_string(),
+            "c3".to_string(),
+            "c4".to_string(),
+        ];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = csv::StringRecord::from(vec!["ok", "ND", "missing", "nd"]);
+        assert!(evaluate(&bound, &row));
+    }
+
+    #[test]
+    fn countmatch_supports_case_insensitive_mode() {
+        let expr = parse_expression("countmatch($1:$3, \"nd\", \"i\") == 2").unwrap();
+        let headers = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let bound = bind_expression(expr, &headers, false).unwrap();
+        let row = csv::StringRecord::from(vec!["ND", "x", "nd"]);
+        assert!(evaluate(&bound, &row));
     }
 }
 
@@ -2206,6 +2356,37 @@ impl Parser {
                         let pattern = args.pop().unwrap();
                         let value = args.pop().unwrap();
                         return Ok(ValueExpr::RegexCall(Box::new(value), Box::new(pattern)));
+                    }
+                    if lower == "countmatch" {
+                        let mut args = self.parse_function_arguments()?;
+                        if args.len() < 2 || args.len() > 3 {
+                            bail!(
+                                "countmatch() expects 2 or 3 arguments: selectors, pattern, optional mode"
+                            );
+                        }
+                        let mode = if args.len() == 3 {
+                            Some(args.pop().unwrap())
+                        } else {
+                            None
+                        };
+                        let pattern = args.pop().unwrap();
+                        let selectors_expr = args.pop().unwrap();
+                        let selectors = match selectors_expr {
+                            ValueExpr::Column(selector) => vec![selector],
+                            ValueExpr::Columns(list) => list,
+                            other => {
+                                bail!(
+                                    "countmatch() expects column selectors as first argument, got {:?}",
+                                    other
+                                )
+                            }
+                        };
+                        let case_insensitive = parse_countmatch_mode(mode.as_ref())?;
+                        return Ok(ValueExpr::CountMatch {
+                            selectors,
+                            pattern: Box::new(pattern),
+                            case_insensitive,
+                        });
                     }
                     if let Some(kind) = try_parse_aggregate_kind(&name)? {
                         let argument = self.parse_arith()?;
