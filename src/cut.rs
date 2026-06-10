@@ -6,8 +6,9 @@ use clap::Args;
 
 use crate::common::{
     ColumnSelector, FileTemplateContext, InputOptions, SpecialColumn, default_headers,
-    parse_selector_list_with_templates, reader_for_path, render_file_template, resolve_selectors,
-    resolve_selectors_allow_duplicates, should_skip_record,
+    parse_selector_list_with_templates, parse_selector_list_with_templates_and_wildcards,
+    reader_for_path, render_file_template, resolve_selectors, resolve_selectors_allow_duplicates,
+    should_skip_record,
 };
 
 #[derive(Args, Debug)]
@@ -15,6 +16,7 @@ use crate::common::{
     about = "Select and reorder TSV columns",
     after_help = "Selector syntax:
   name,index,range,regex mix:  id,2,group:tech,~\"^IL\"
+  opt-in wildcards:           -w -f '*col1,col2*,col3.'
   negative indices/ranges:     -1,-2:     (last column, second-last to end)
   literal symbol names:        `2:4`      (avoid selector parsing)
 
@@ -50,10 +52,12 @@ Examples:
   tsvkit cut -H -f '3,1,-1' data.tsv
   tsvkit cut -C ';' -E -I -f '1:3' dirty.tsv
   tsvkit cut -D -f 'value,~\"^value$\"' duplicated_headers.tsv
+  tsvkit cut -w -f '*col1,col2*,col3.' data.tsv
 
 Practical tips:
   - Use -f first, then pipe into filter/summarize/sort for analysis workflows.
   - Use regex selectors (~\"...\") to keep evolving column groups (e.g. assays).
+  - Use -w/--wildcard only when you want '*' (any text) and '.' (any one char) in names to match patterns.
   - Use template/injected selectors to preserve provenance when concatenating files."
 )]
 pub struct CutArgs {
@@ -100,13 +104,21 @@ pub struct CutArgs {
     #[arg(short = 'I', long = "ignore-illegal-row")]
     pub ignore_illegal_row: bool,
 
-    /// Allow duplicate column matches when resolving names or regex selectors
+    /// Allow duplicate column matches when resolving names, regex selectors, or wildcard selectors
     #[arg(short = 'D', long = "allow-dups")]
     pub allow_dups: bool,
+
+    /// Interpret unquoted '*' and '.' in field names as wildcard pattern characters ('*' = any text, '.' = any one character)
+    #[arg(short = 'w', long = "wildcard", visible_alias = "wildcards")]
+    pub wildcard: bool,
 }
 
 pub fn run(args: CutArgs) -> Result<()> {
-    let selectors = parse_selector_list_with_templates(&args.fields)?;
+    let selectors = if args.wildcard {
+        parse_selector_list_with_templates_and_wildcards(&args.fields)?
+    } else {
+        parse_selector_list_with_templates(&args.fields)?
+    };
     let input_opts = InputOptions::from_flags(
         &args.comment_char,
         args.ignore_empty_row,

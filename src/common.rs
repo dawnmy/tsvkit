@@ -30,27 +30,36 @@ pub enum ColumnSelector {
     FromEnd(usize),
     Name(String),
     Regex(String),
+    Wildcard(String),
     Template(String),
     Range(Option<Box<ColumnSelector>>, Option<Box<ColumnSelector>>),
     Special(SpecialColumn),
 }
 
 pub fn parse_selector_list(spec: &str) -> Result<Vec<ColumnSelector>> {
-    parse_selector_list_impl(spec, false)
+    parse_selector_list_impl(spec, false, false)
 }
 
 pub fn parse_selector_list_with_templates(spec: &str) -> Result<Vec<ColumnSelector>> {
-    parse_selector_list_impl(spec, true)
+    parse_selector_list_impl(spec, true, false)
 }
 
-fn parse_selector_list_impl(spec: &str, braces_as_templates: bool) -> Result<Vec<ColumnSelector>> {
+pub fn parse_selector_list_with_templates_and_wildcards(spec: &str) -> Result<Vec<ColumnSelector>> {
+    parse_selector_list_impl(spec, true, true)
+}
+
+fn parse_selector_list_impl(
+    spec: &str,
+    braces_as_templates: bool,
+    wildcards_enabled: bool,
+) -> Result<Vec<ColumnSelector>> {
     if spec.trim().is_empty() {
         bail!("column specification must not be empty");
     }
 
     tokenize_selector_spec(spec)?
         .into_iter()
-        .map(|token| parse_selector_token(token, braces_as_templates))
+        .map(|token| parse_selector_token(token, braces_as_templates, wildcards_enabled))
         .collect()
 }
 
@@ -140,7 +149,8 @@ fn resolve_selectors_with_options(
             ColumnSelector::Index(_)
             | ColumnSelector::FromEnd(_)
             | ColumnSelector::Name(_)
-            | ColumnSelector::Regex(_) => {
+            | ColumnSelector::Regex(_)
+            | ColumnSelector::Wildcard(_) => {
                 let mut resolved =
                     resolve_selector_indices(headers, selector, no_header, allow_duplicates)?;
                 indices.append(&mut resolved);
@@ -515,7 +525,11 @@ fn capitalize_first(input: &str) -> String {
     }
 }
 
-fn parse_selector_token(token: SelectorToken, braces_as_templates: bool) -> Result<ColumnSelector> {
+fn parse_selector_token(
+    token: SelectorToken,
+    braces_as_templates: bool,
+    wildcards_enabled: bool,
+) -> Result<ColumnSelector> {
     if token.text.is_empty() {
         return Err(anyhow!("empty column selector"));
     }
@@ -535,6 +549,7 @@ fn parse_selector_token(token: SelectorToken, braces_as_templates: bool) -> Resu
             Some(Box::new(parse_simple_selector(
                 start_trim,
                 braces_as_templates,
+                false,
             )?))
         };
         let end_selector = if end_trim.is_empty() {
@@ -543,15 +558,20 @@ fn parse_selector_token(token: SelectorToken, braces_as_templates: bool) -> Resu
             Some(Box::new(parse_simple_selector(
                 end_trim,
                 braces_as_templates,
+                false,
             )?))
         };
         return Ok(ColumnSelector::Range(start_selector, end_selector));
     }
 
-    parse_simple_selector(&token.text, braces_as_templates)
+    parse_simple_selector(&token.text, braces_as_templates, wildcards_enabled)
 }
 
-fn parse_simple_selector(token: &str, braces_as_templates: bool) -> Result<ColumnSelector> {
+fn parse_simple_selector(
+    token: &str,
+    braces_as_templates: bool,
+    wildcards_enabled: bool,
+) -> Result<ColumnSelector> {
     if token.is_empty() {
         return Err(anyhow!("empty column selector"));
     }
@@ -590,7 +610,40 @@ fn parse_simple_selector(token: &str, braces_as_templates: bool) -> Result<Colum
         }
         return Ok(ColumnSelector::Index(idx - 1));
     }
+    if wildcards_enabled && contains_wildcard(token) {
+        return Ok(ColumnSelector::Wildcard(token.to_string()));
+    }
     Ok(ColumnSelector::Name(token.to_string()))
+}
+
+fn contains_wildcard(token: &str) -> bool {
+    if is_inline_template_like(token) {
+        return false;
+    }
+    token.contains('*') || token.contains('.')
+}
+
+fn is_inline_template_like(token: &str) -> bool {
+    token
+        .split_once('=')
+        .map(|(_, rhs)| {
+            let rhs = rhs.trim();
+            rhs.starts_with('{') && rhs.ends_with('}')
+        })
+        .unwrap_or(false)
+}
+
+fn wildcard_pattern_to_regex(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '.' => regex.push('.'),
+            other => regex.push_str(&regex::escape(&other.to_string())),
+        }
+    }
+    regex.push('$');
+    regex
 }
 
 fn parse_regex_literal(token: &str) -> Result<Option<String>> {
@@ -840,6 +893,36 @@ fn tokenize_selector_spec(spec: &str) -> Result<Vec<SelectorToken>> {
     Ok(tokens)
 }
 
+fn resolve_pattern_selector(
+    headers: &[String],
+    no_header: bool,
+    allow_duplicates: bool,
+    regex_pattern: &str,
+    display_pattern: &str,
+    selector_kind: &str,
+) -> Result<Vec<usize>> {
+    if no_header {
+        bail!("{} column selectors require headers", selector_kind);
+    }
+    let regex = Regex::new(regex_pattern)
+        .with_context(|| format!("invalid {} pattern '{}'", selector_kind, display_pattern))?;
+    let mut seen = HashSet::new();
+    let mut matches = Vec::new();
+    for (idx, header) in headers.iter().enumerate() {
+        if regex.is_match(header) && (allow_duplicates || seen.insert(header.clone())) {
+            matches.push(idx);
+        }
+    }
+    if matches.is_empty() {
+        bail!(
+            "{} pattern '{}' did not match any columns",
+            selector_kind,
+            display_pattern
+        );
+    }
+    Ok(matches)
+}
+
 fn resolve_selector_indices(
     headers: &[String],
     selector: &ColumnSelector,
@@ -895,25 +978,24 @@ fn resolve_selector_indices(
                 Ok(vec![index])
             }
         }
-        ColumnSelector::Regex(pattern) => {
-            if no_header {
-                bail!("regex column selectors require headers");
-            }
-            let regex = Regex::new(pattern)
-                .with_context(|| format!("invalid regex pattern '{}'", pattern))?;
-            let mut seen = HashSet::new();
-            let mut matches = Vec::new();
-            for (idx, header) in headers.iter().enumerate() {
-                if regex.is_match(header) {
-                    if allow_duplicates || seen.insert(header.clone()) {
-                        matches.push(idx);
-                    }
-                }
-            }
-            if matches.is_empty() {
-                bail!("regex pattern '{}' did not match any columns", pattern);
-            }
-            Ok(matches)
+        ColumnSelector::Regex(pattern) => resolve_pattern_selector(
+            headers,
+            no_header,
+            allow_duplicates,
+            pattern,
+            pattern,
+            "regex",
+        ),
+        ColumnSelector::Wildcard(pattern) => {
+            let regex_pattern = wildcard_pattern_to_regex(pattern);
+            resolve_pattern_selector(
+                headers,
+                no_header,
+                allow_duplicates,
+                &regex_pattern,
+                pattern,
+                "wildcard",
+            )
         }
         ColumnSelector::Template(template) => bail!(
             "template selector '{{{}}}' cannot be resolved as a positional index",
@@ -971,6 +1053,9 @@ fn resolve_selector_index(
         ColumnSelector::Regex(_) => {
             bail!("regex column selectors cannot be used in range endpoints")
         }
+        ColumnSelector::Wildcard(_) => {
+            bail!("wildcard column selectors cannot be used in range endpoints")
+        }
         ColumnSelector::Template(template) => {
             bail!(
                 "template selector '{{{}}}' cannot be used in range endpoints",
@@ -998,9 +1083,10 @@ mod tests {
     use xz2::write::XzEncoder;
 
     use super::{
-        ColumnSelector, FileTemplateContext, SpecialColumn, parse_selector_list,
-        open_path_reader, parse_selector_list_with_templates, parse_single_selector,
-        render_file_template, resolve_selectors, resolve_selectors_allow_duplicates,
+        ColumnSelector, FileTemplateContext, SpecialColumn, open_path_reader, parse_selector_list,
+        parse_selector_list_with_templates, parse_selector_list_with_templates_and_wildcards,
+        parse_single_selector, render_file_template, resolve_selectors,
+        resolve_selectors_allow_duplicates,
     };
 
     #[test]
@@ -1162,6 +1248,45 @@ mod tests {
         ));
         assert!(matches!(selectors[1], ColumnSelector::Name(ref name) if name == "__file__"));
         assert!(matches!(selectors[2], ColumnSelector::Name(ref name) if name == "__base__"));
+    }
+
+    #[test]
+    fn wildcard_selectors_match_headers_when_enabled() {
+        let headers = vec![
+            "alpha_col1".to_string(),
+            "col2_a".to_string(),
+            "col2_b".to_string(),
+            "col3x".to_string(),
+            "col3xy".to_string(),
+        ];
+        let selectors =
+            parse_selector_list_with_templates_and_wildcards("*col1,col2*,col3.").unwrap();
+        assert!(
+            matches!(selectors[0], ColumnSelector::Wildcard(ref pattern) if pattern == "*col1")
+        );
+        let indices = resolve_selectors(&headers, &selectors, false).unwrap();
+        assert_eq!(indices, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn wildcard_mode_preserves_quoted_literals() {
+        let selectors = parse_selector_list_with_templates_and_wildcards("`a.b`,{c*d}").unwrap();
+        assert!(matches!(selectors[0], ColumnSelector::Name(ref name) if name == "a.b"));
+        assert!(
+            matches!(selectors[1], ColumnSelector::Template(ref template) if template == "c*d")
+        );
+    }
+
+    #[test]
+    fn wildcard_mode_preserves_inline_templates() {
+        let selectors = parse_selector_list_with_templates_and_wildcards("sample={base.}").unwrap();
+        assert!(matches!(selectors[0], ColumnSelector::Name(ref name) if name == "sample={base.}"));
+    }
+
+    #[test]
+    fn wildcard_characters_are_literal_without_wildcard_mode() {
+        let selectors = parse_selector_list_with_templates("a.b").unwrap();
+        assert!(matches!(selectors[0], ColumnSelector::Name(ref name) if name == "a.b"));
     }
 
     #[test]
