@@ -131,6 +131,7 @@ Selectors are reused in `cut`, `filter`, `join`, `mutate`, `summarize`, and othe
 | `-index` | Column counted from the end (1 = last). | `-1,-2` |
 | `start:end` | Inclusive range by name or index. Supports open ends. | `IL6:IL10`, `2:5`, `:IL10`, `IL6:` |
 | `~"regex"` | Columns whose names match the regular expression. Requires headers. | `~"^sample_"` |
+| `-w`/`--wildcard` + `*`/`.` | In `cut`, opt in to wildcard header matching (`*` = any text, `.` = any one character). | `-w -f '*col1,col2*,col3.'` |
 | `:` | Select every column in order. | `-f ':'` |
 | `mixed` | Combine names, indices, ranges, and regexes. | `sample_id,3:5,~"_pct$"` |
 | `multi-file` | Separate selectors for each input with semicolons (primarily `join`). | `sample_id;subject_id` |
@@ -140,7 +141,9 @@ Selectors are reused in `cut`, `filter`, `join`, `mutate`, `summarize`, and othe
 
 Negative indices are also valid inside ranges: `:-2` selects every column except the final two, while `-3:` keeps the last three columns. Regex selectors deduplicate by first match; add `--allow-dups` (or `-D`) on `cut`/`summarize` when you need repeated columns.
 
-> Regex selectors require a header row. When `-H/--no-header` is active, using `~"..."` results in an error with guidance to remove the regex or restore headers.
+Wildcard selectors are opt-in for `cut` so existing literal column names containing `*` or `.` continue to resolve exactly. With `-w`/`--wildcard`, unquoted `*` matches any text and unquoted `.` matches any single character; wrap a selector in backticks when you need a literal `*` or `.` in wildcard mode.
+
+> Regex and wildcard selectors require a header row. When `-H/--no-header` is active, using `~"..."` or `-w`/`--wildcard` patterns results in an error with guidance to remove the pattern selector or restore headers.
 
 Anywhere you access column *values* inside an expression, prefix the selector with `$` (`$purity`, `$1`, `$IL6:$IL10`).
 
@@ -252,6 +255,12 @@ Regex selectors pick up columns whose headers match a pattern. Combine them with
 
 ```bash
 tsvkit cut -f '1,group,~"^IL",~"_pct$"' examples/qc.tsv
+```
+
+Wildcard selectors are available behind `-w`/`--wildcard` for simpler header patterns. In this mode, `*` means “any text” and `.` means “any one character”:
+
+```bash
+tsvkit cut -w -f '*col1,col2*,col3.' data.tsv
 ```
 
 Injecting the source file basename (`__base__`) or filename with path (`__file__`):
